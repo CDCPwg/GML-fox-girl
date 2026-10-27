@@ -25,7 +25,7 @@ import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     "wechat": {"enabled": False, "adb_path": "adb", "device_serial": "", "input_tap_x": 0, "input_tap_y": 0},
     "humanize": {"reply_delay_min_ms": 1200, "reply_delay_max_ms": 6000, "max_per_chat_per_hour": 12},
     "proactive": {"enabled": False, "quiet_hours": "23:30-07:30", "max_per_day": 5, "reply_probability_group": 0.3},
+    "admin": {"qq": [], "wechat": []},
     "collector": {"host": "127.0.0.1", "port": 3001, "token": ""},
 }
 
@@ -592,7 +593,7 @@ def t_download_media(url, **_):
     return {"path": out}
 
 
-def t_manage_persona(action, name=None, prompt=None, style=None, persona_id=None, **_):
+def t_manage_persona(action, name=None, prompt=None, style=None, persona_id=None, file_path=None, **_):
     with LOCK:
         if action == "list":
             rows = [dict(r) for r in CONN.execute("SELECT * FROM personas ORDER BY is_active DESC, id")]
@@ -635,6 +636,38 @@ def t_manage_persona(action, name=None, prompt=None, style=None, persona_id=None
             CONN.execute("DELETE FROM personas WHERE id=? OR name=?", (persona_id or -1, name or ""))
             CONN.commit()
             return {"ok": True}
+        if action == "export":
+            row = CONN.execute("SELECT * FROM personas WHERE id=? OR name=?",
+                               (persona_id or -1, name or "")).fetchone()
+            if not row:
+                raise ValueError("人格不存在")
+            pdir = os.path.join(DATA_DIR, "personas")
+            os.makedirs(pdir, exist_ok=True)
+            safe = re.sub(r'[\\/:*?"<>|]+', "_", row["name"]).strip("_") or "persona"
+            path = os.path.join(pdir, safe + ".json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"name": row["name"], "prompt": row["prompt"], "style": row["style"]},
+                          f, ensure_ascii=False, indent=2)
+            return {"ok": True, "file": path,
+                    "persona": {"name": row["name"], "prompt": row["prompt"], "style": row["style"]}}
+        if action == "import":
+            if not file_path:
+                raise ValueError("import 需要 file_path（export 生成的 JSON 文件）")
+            with open(file_path, encoding="utf-8") as f:
+                data = json.load(f)
+            pname, pprompt = str(data.get("name") or "imported").strip(), str(data.get("prompt") or "")
+            if not pprompt:
+                raise ValueError("导入文件缺少 prompt")
+            base, n = pname, 1
+            while CONN.execute("SELECT 1 FROM personas WHERE name=?", (pname,)).fetchone():
+                n += 1
+                pname = f"{base}_{n}"
+            cur = CONN.execute(
+                "INSERT INTO personas(name, prompt, style, is_active, created_at, updated_at) VALUES(?,?,?,0,?,?)",
+                (pname, pprompt, str(data.get("style") or ""), now_str(), now_str()))
+            CONN.commit()
+            return {"ok": True, "persona_id": cur.lastrowid, "name": pname,
+                    "hint": "调用 manage_persona action=set_active 启用"}
     raise ValueError(f"未知 action: {action}")
 
 
@@ -797,6 +830,65 @@ def t_proactive_due(**_):
             "group_reply_probability": cfg.get("reply_probability_group", 0.3)}
 
 
+PERSONA_CMDS = (
+    ("/personahelp", "help"), ("/personas", "list"), ("/botstatus", "status"), ("/persona", "switch"),
+    ("切换人格", "switch"), ("人格列表", "list"), ("机器人状态", "status"), ("人格指令", "help"),
+)
+
+
+def t_bot_command(text, channel="", contact_id="", chat_id="", **_):
+    """管理指令入口：管理员在 QQ/微信聊天里即可热切换人格。handled=true 时大脑直接发送 reply。"""
+    raw = (text or "").strip()
+    if not raw:
+        return {"handled": False}
+    action, arg = None, ""
+    for prefix, act in PERSONA_CMDS:
+        if raw.startswith(prefix):
+            action, arg = act, raw[len(prefix):].strip()
+            break
+    if action is None:
+        return {"handled": False}
+    admins_cfg = load_config().get("admin", {}).get(channel) or []
+    if isinstance(admins_cfg, str):
+        admins_cfg = [a.strip() for a in admins_cfg.split(",") if a.strip()]
+    if str(contact_id) not in {str(a) for a in admins_cfg}:
+        return {"handled": True, "allowed": False, "action": action,
+                "reply": "这条指令只有管理员能用。"}
+    with LOCK:
+        if action == "switch":
+            prev = CONN.execute("SELECT name FROM personas WHERE is_active=1").fetchone()
+            names = [r["name"] for r in CONN.execute("SELECT name FROM personas ORDER BY id")]
+            if not arg:
+                return {"handled": True, "allowed": True, "action": "switch", "ok": False,
+                        "reply": "用法：切换人格 <名称>。现有：" + ("、".join(names) or "（库是空的）")}
+            row = CONN.execute("SELECT id, name FROM personas WHERE name=?", (arg,)).fetchone()
+            if not row:
+                return {"handled": True, "allowed": True, "action": "switch", "ok": False,
+                        "reply": f"没有叫「{arg}」的人格。现有：{'、'.join(names) or '（库是空的）'}"}
+            CONN.execute("UPDATE personas SET is_active=0")
+            CONN.execute("UPDATE personas SET is_active=1 WHERE id=?", (row["id"],))
+            CONN.commit()
+            return {"handled": True, "allowed": True, "action": "switch", "ok": True,
+                    "reply": f"已切换：{prev['name'] if prev else '（无）'} → {row['name']}，接下来的话就换这个人格说啦",
+                    "data": {"active": row["name"]}}
+        if action == "list":
+            rows = [dict(r) for r in CONN.execute(
+                "SELECT name, style, is_active FROM personas ORDER BY is_active DESC, id")]
+        lines = [f"{'▶ ' if r['is_active'] else '· '}{r['name']}" + (f"（{r['style'][:20]}）" if r["style"] else "")
+                 for r in rows]
+        return {"handled": True, "allowed": True, "action": "list",
+                "reply": "人格库：\n" + "\n".join(lines) + "\n切换用：切换人格 <名称>"}
+    if action == "status":
+        st = t_bot_status()
+        data = {"active_persona": st.get("active_persona"),
+                "pending_messages": st["counts"]["pending_messages"],
+                "memories": st["counts"]["memories"], "rules": st["counts"]["rules"],
+                "stickers": st["counts"]["stickers"], "collector_running": st["collector"]["running"]}
+        return {"handled": True, "allowed": True, "action": "status", "reply": None, "data": data}
+    return {"handled": True, "allowed": True, "action": "help",
+            "reply": "管理指令：切换人格 <名称> / 人格列表 / 机器人状态 / 人格指令"}
+
+
 TOOLS = {
     "bot_status": (t_bot_status, "查看机器人整体状态：数据目录、激活人格、待处理消息数、QQ/微信渠道配置、collector 是否在运行。任何会话开始时先调用它。", {"type": "object", "properties": {}}),
     "configure_channel": (t_configure_channel, "配置 QQ(NapCat) 或微信(ADB) 渠道：地址、token、adb 路径、设备序列号、collector 端口。", {"type": "object", "properties": {"channel": {"type": "string", "enum": ["qq", "wechat"]}, "enabled": {"type": "boolean"}, "napcat_base_url": {"type": "string"}, "napcat_token": {"type": "string"}, "adb_path": {"type": "string"}, "device_serial": {"type": "string"}, "collector_port": {"type": "number"}}, "required": ["channel"]}),
@@ -818,6 +910,7 @@ TOOLS = {
     "manage_stickers": (t_manage_stickers, "表情包库：add(本地图片路径,emotion,tags) / list / delete。emotion 建议用 happy/sad/angry/love/awkward/food 等标签。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["add", "list", "delete"]}, "file_path": {"type": "string"}, "emotion": {"type": "string"}, "tags": {"type": "string"}, "source": {"type": "string"}, "sticker_id": {"type": "number"}}, "required": ["action"]}),
     "pick_sticker": (t_pick_sticker, "按情绪挑选表情包返回本地路径（自动避免连用同一张），配合 send_qq_message 的 image_path 发送。", {"type": "object", "properties": {"emotion": {"type": "string"}}}),
     "proactive_due": (t_proactive_due, "判断现在是否允许主动发起聊天（enabled、安静时段、每日上限）。主动发言前必须调用。", {"type": "object", "properties": {}}),
+    "bot_command": (t_bot_command, "管理指令入口（管理员在 QQ/微信聊天里热切换人格）。对每条入站消息先调用：handled=true 时发送 reply 并结束该条处理；handled=false 继续正常人格流程。指令：切换人格 <名称>、人格列表、机器人状态、人格指令。管理员配置在 admin.qq / admin.wechat。", {"type": "object", "properties": {"text": {"type": "string"}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}}, "required": ["text"]}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}
