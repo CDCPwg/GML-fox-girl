@@ -21,11 +21,12 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -36,13 +37,18 @@ CONN = None
 
 DEFAULT_CONFIG = {
     "qq": {"enabled": False, "napcat_base_url": "http://127.0.0.1:3000", "napcat_token": ""},
-    "wechat": {"enabled": False, "adb_path": "adb", "device_serial": "", "input_tap_x": 0, "input_tap_y": 0},
-    "humanize": {"reply_delay_min_ms": 1200, "reply_delay_max_ms": 6000, "max_per_chat_per_hour": 12},
-    "proactive": {"enabled": False, "quiet_hours": "23:30-07:30", "max_per_day": 5, "reply_probability_group": 0.3},
+    "humanize": {"reply_delay_min_ms": 1200, "reply_delay_max_ms": 6000,
+                 "max_per_chat_per_hour": 12, "outbox_ttl_min": 30},
+    "proactive": {"enabled": False, "quiet_hours": "23:30-07:30", "max_per_day": 5,
+                  "reply_probability_group": 0.3, "topic_reply": False, "topics": []},
     "admin": {"qq": [], "wechat": []},
-    "memory": {"embed_base_url": "", "embed_api_key": "", "embed_model": "embedding-3"},
+    "memory": {"embed_base_url": "", "embed_api_key": "", "embed_model": "embedding-3",
+               "half_life_days": 30},
+    "mood": {"current": 0, "reason": ""},
     "video": {"ffmpeg_path": "ffmpeg"},
     "stickers": {"auto_collect": True},
+    "wechat": {"enabled": False, "adb_path": "adb", "device_serial": "", "input_tap_x": 0,
+               "input_tap_y": 0, "human_trace": True},
     "collector": {"host": "127.0.0.1", "port": 3001, "token": ""},
 }
 
@@ -54,7 +60,7 @@ CREATE TABLE IF NOT EXISTS personas(
 CREATE TABLE IF NOT EXISTS memories(
   id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT DEFAULT '', chat_id TEXT DEFAULT '',
   contact_id TEXT DEFAULT '', kind TEXT DEFAULT 'event', importance INTEGER DEFAULT 3,
-  content TEXT NOT NULL, embedding TEXT DEFAULT '', created_at TEXT);
+  content TEXT NOT NULL, embedding TEXT DEFAULT '', emotion INTEGER DEFAULT 0, created_at TEXT);
 CREATE TABLE IF NOT EXISTS profiles(
   id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, contact_id TEXT NOT NULL,
   display_name TEXT DEFAULT '', impression TEXT DEFAULT '', style_notes TEXT DEFAULT '',
@@ -75,6 +81,10 @@ CREATE TABLE IF NOT EXISTS messages(
   processed INTEGER DEFAULT 0, out_kind TEXT DEFAULT 'reply', created_at TEXT);
 CREATE TABLE IF NOT EXISTS counters(
   chat_key TEXT PRIMARY KEY, window_start REAL, count INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS outbox(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT DEFAULT 'qq', chat_type TEXT DEFAULT 'private',
+  chat_id TEXT DEFAULT '', contact_id TEXT DEFAULT '', text TEXT DEFAULT '', image_path TEXT DEFAULT '',
+  out_kind TEXT DEFAULT 'reply', tries INTEGER DEFAULT 0, last_error TEXT DEFAULT '', created_at TEXT);
 """
 
 
@@ -84,6 +94,7 @@ def now_str():
 
 def _migrate():
     for table, col, decl in (("memories", "embedding", "TEXT DEFAULT ''"),
+                             ("memories", "emotion", "INTEGER DEFAULT 0"),
                              ("stickers", "source_url", "TEXT DEFAULT ''")):
         cols = {r[1] for r in CONN.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
@@ -222,6 +233,20 @@ def _cosine(a, b):
     na = sum(x * x for x in a) ** 0.5
     nb = sum(x * x for x in b) ** 0.5
     return dot / (na * nb) if na and nb else 0.0
+
+
+def _parse_dt(s):
+    try:
+        return time.mktime(datetime.strptime(s, "%Y-%m-%d %H:%M:%S").timetuple())
+    except Exception:
+        return time.mktime(datetime.now().timetuple())
+
+
+def _memory_score(row, now_ts, half_life_days):
+    """重要级+情绪强度，随时间指数衰减（遗忘曲线）：强情绪记忆衰减更慢。"""
+    age_days = max(0.0, (now_ts - _parse_dt(row["created_at"])) / 86400.0)
+    decay = 0.5 ** (age_days / max(1.0, float(half_life_days)))
+    return (int(row["importance"]) + abs(int(row.get("emotion") or 0))) * decay
 
 
 # ---------------------------------------------------------------- NapCat (QQ)
@@ -448,7 +473,9 @@ def t_bot_status(**_):
                        "pending_messages": pending, "memories": one("SELECT COUNT(*) FROM memories"),
                        "profiles": one("SELECT COUNT(*) FROM profiles"),
                        "rules": one("SELECT COUNT(*) FROM rules"),
-                       "stickers": one("SELECT COUNT(*) FROM stickers")},
+                       "stickers": one("SELECT COUNT(*) FROM stickers"),
+                       "outbox": one("SELECT COUNT(*) FROM outbox")},
+            "intro_shown": bool(load_config().get("intro", {}).get("shown")),
             "qq": {"enabled": cfg["qq"]["enabled"], "napcat_base_url": cfg["qq"]["napcat_base_url"],
                    "token_set": bool(cfg["qq"]["napcat_token"])},
             "wechat": {"enabled": cfg["wechat"]["enabled"], "adb_path": cfg["wechat"]["adb_path"],
@@ -588,7 +615,19 @@ def t_send_qq_message(chat_type, chat_id, text="", image_path=None, contact_id=N
     action = "send_private_msg" if chat_type == "private" else "send_group_msg"
     param = {"user_id": int(chat_id)} if chat_type == "private" else {"group_id": int(chat_id)}
     param["message"] = message
-    resp = napcat_post(action, param)
+    try:
+        resp = napcat_post(action, param)
+    except (urllib.error.URLError, socket.timeout, OSError) as e:
+        with LOCK:
+            CONN.execute(
+                "INSERT INTO outbox(channel, chat_type, chat_id, contact_id, text, image_path,"
+                " out_kind, tries, last_error, created_at) VALUES('qq',?,?,?,?,?,?,1,?,?)",
+                (chat_type, str(chat_id), str(contact_id or ""), text, image_path or "",
+                 out_kind, str(e)[:200], now_str()))
+            CONN.commit()
+        return {"sent": False, "queued": True,
+                "reason": "NapCat 暂时不可达，已入发送队列（心跳时 flush_outbox 自动补发）",
+                "detail": str(e)[:120]}
     with LOCK:
         CONN.execute(
             "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, msg_type, content,"
@@ -733,17 +772,18 @@ def t_manage_persona(action, name=None, prompt=None, style=None, persona_id=None
     raise ValueError(f"未知 action: {action}")
 
 
-def t_store_memory(content, channel="", chat_id="", contact_id="", kind="event", importance=3, **_):
+def t_store_memory(content, channel="", chat_id="", contact_id="", kind="event", importance=3, emotion=0, **_):
     if not content:
         raise ValueError("content 不能为空")
     importance = max(1, min(5, int(importance)))
+    emo = max(-3, min(3, int(emotion)))
     vec = embed_text(content)
     with LOCK:
         cur = CONN.execute(
-            "INSERT INTO memories(channel, chat_id, contact_id, kind, importance, content, embedding, created_at)"
-            " VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO memories(channel, chat_id, contact_id, kind, importance, content, embedding, emotion, created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
             (channel or "", str(chat_id or ""), str(contact_id or ""), kind, importance, content,
-             json.dumps(vec) if vec else "", now_str()))
+             json.dumps(vec) if vec else "", emo, now_str()))
         CONN.commit()
         return {"ok": True, "memory_id": cur.lastrowid, "embedded": bool(vec)}
 
@@ -764,6 +804,8 @@ def t_query_memory(keyword=None, contact_id=None, chat_id=None, channel=None, li
     args.append(cap)
     with LOCK:
         rows = [dict(r) for r in CONN.execute(q, args).fetchall()]
+    now_ts = time.mktime(datetime.now().timetuple())
+    half = float(load_config().get("memory", {}).get("half_life_days", 30))
     if semantic and keyword:
         qv = embed_text(keyword)
         if qv:
@@ -777,7 +819,12 @@ def t_query_memory(keyword=None, contact_id=None, chat_id=None, channel=None, li
                     continue
             if scored:
                 scored.sort(key=lambda t: -t[1])
-                rows = [{**r, "similarity": round(s, 4)} for r, s in scored]
+                rows = [{**r, "similarity": round(s, 4), "score": round(_memory_score(r, now_ts, half), 4)}
+                        for r, s in scored]
+    if rows and "score" not in rows[0]:
+        for r in rows:
+            r["score"] = round(_memory_score(r, now_ts, half), 4)
+        rows.sort(key=lambda x: (-x["score"], -int(x["id"])))
     rows = rows[:max(1, min(int(limit), 50))]
     return {"count": len(rows), "memories": rows}
 
@@ -1005,6 +1052,151 @@ def t_extract_video_frames(video_path, frames=4, **_):
     return {"frames": paths, "hint": "用 Read 逐帧查看以理解视频内容"}
 
 
+def t_prune_memory(keep_score=1.0, dry_run=True, limit=500, **_):
+    """遗忘曲线清理：删除得分低于 keep_score 且重要级<=3 的记忆（重要级>=4 永不清理）。"""
+    half = float(load_config().get("memory", {}).get("half_life_days", 30))
+    now_ts = time.mktime(datetime.now().timetuple())
+    with LOCK:
+        rows = [dict(r) for r in CONN.execute(
+            "SELECT * FROM memories ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 1000)),))]
+    victims = []
+    for r in rows:
+        score = _memory_score(r, now_ts, half)
+        if score < float(keep_score) and int(r["importance"]) <= 3:
+            victims.append((r["id"], round(score, 3), r["content"][:40]))
+    if dry_run:
+        return {"would_delete": len(victims), "samples": victims[:10],
+                "note": "dry_run=false 才真正删除；importance>=4 永不清理"}
+    with LOCK:
+        CONN.executemany("DELETE FROM memories WHERE id=?", [(v[0],) for v in victims])
+        CONN.commit()
+    return {"deleted": len(victims), "samples": victims[:10]}
+
+
+def t_flush_outbox(max_age_min=30, **_):
+    """补发队列：NapCat 恢复后重试；超过 max_age_min 分钟的过期丢弃。"""
+    ttl = float(max_age_min)
+    now_ts = time.time()
+    sent, dropped, failed = 0, 0, []
+    with LOCK:
+        rows = [dict(r) for r in CONN.execute("SELECT * FROM outbox ORDER BY id")]
+    for r in rows:
+        age_min = (now_ts - _parse_dt(r["created_at"])) / 60.0
+        if age_min > ttl:
+            with LOCK:
+                CONN.execute("DELETE FROM outbox WHERE id=?", (r["id"],))
+                CONN.commit()
+            dropped += 1
+            continue
+        message = []
+        if r["text"]:
+            message.append({"type": "text", "data": {"text": r["text"]}})
+        if r["image_path"]:
+            message.append({"type": "image", "data": {"file": to_file_uri(r["image_path"])}})
+        if not message:
+            with LOCK:
+                CONN.execute("DELETE FROM outbox WHERE id=?", (r["id"],))
+                CONN.commit()
+            dropped += 1
+            continue
+        action = "send_private_msg" if r["chat_type"] == "private" else "send_group_msg"
+        param = ({"user_id": int(r["chat_id"])} if r["chat_type"] == "private"
+                 else {"group_id": int(r["chat_id"])})
+        param["message"] = message
+        try:
+            resp = napcat_post(action, param)
+        except Exception as e:
+            with LOCK:
+                CONN.execute("UPDATE outbox SET tries=tries+1, last_error=? WHERE id=?",
+                             (str(e)[:200], r["id"]))
+                CONN.commit()
+            failed.append(r["id"])
+            continue
+        with LOCK:
+            CONN.execute(
+                "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, msg_type,"
+                " content, media_path, out_kind, processed, created_at)"
+                " VALUES('out','qq',?,?,?,?,?,?,?,1,?)",
+                (r["chat_type"], r["chat_id"], r["contact_id"], "text" if r["text"] else "image",
+                 r["text"], r["image_path"], r["out_kind"], now_str()))
+            CONN.execute("DELETE FROM outbox WHERE id=?", (r["id"],))
+            CONN.commit()
+        sent += 1
+        time.sleep(0.3)
+    with LOCK:
+        remaining = CONN.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+    return {"sent": sent, "dropped": dropped, "failed": failed, "remaining": remaining}
+
+
+def _st_card_from_json(obj):
+    data = obj.get("data") if isinstance(obj, dict) and isinstance(obj.get("data"), dict) else obj
+    name = str(data.get("name") or data.get("char_name") or "").strip()
+    desc = str(data.get("description") or data.get("char_persona") or "").strip()
+    personality = str(data.get("personality") or "").strip()
+    scenario = str(data.get("scenario") or data.get("world_scenario") or "").strip()
+    mes = str(data.get("mes_example") or "").strip()
+    first = str(data.get("first_mes") or data.get("char_greeting") or "").strip()
+    return name, desc, personality, scenario, mes, first
+
+
+def _st_card_from_png(path):
+    with open(path, "rb") as f:
+        blob = f.read()
+    if blob[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("不是 PNG 文件")
+    pos = 8
+    while pos + 8 <= len(blob):
+        length = int.from_bytes(blob[pos:pos + 4], "big")
+        ctype = blob[pos + 4:pos + 8]
+        data = blob[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if ctype == b"tEXt":
+            parts = data.split(b"\x00", 1)
+            if len(parts) == 2 and parts[0].decode("latin-1", "replace") in ("chara", "ccv3"):
+                return json.loads(base64.b64decode(parts[1]).decode("utf-8"))
+        if ctype == b"IEND":
+            break
+    raise ValueError("PNG 里没有 SillyTavern 角色卡数据（tEXt chara 块）")
+
+
+def t_import_sillytavern(file_path, **_):
+    """导入 SillyTavern 角色卡（.json 或带 tEXt chara 块的 .png）为人格。"""
+    if not file_path or not os.path.exists(file_path):
+        raise ValueError(f"file_path 不存在: {file_path}")
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".png":
+        obj = _st_card_from_png(file_path)
+    elif ext == ".json":
+        with open(file_path, encoding="utf-8") as f:
+            obj = json.load(f)
+    else:
+        raise ValueError("支持 .json 或内嵌角色卡的 .png（SillyTavern 导出格式）")
+    name, desc, personality, scenario, mes, first = _st_card_from_json(obj)
+    if not name or not (desc or personality or scenario):
+        raise ValueError("角色卡缺少 name 或描述字段，无法生成人格")
+    prompt = f"你是{name}。"
+    if desc:
+        prompt += "\n\n" + desc
+    if personality:
+        prompt += "\n\n性格：" + personality
+    if scenario:
+        prompt += "\n\n场景设定：" + scenario
+    style = ""
+    if first or mes:
+        style = ("开场示例：" + first[:200] + (("\n对话示例：" + mes[:300]) if mes else "")).strip()
+    with LOCK:
+        base, n = name, 1
+        while CONN.execute("SELECT 1 FROM personas WHERE name=?", (name,)).fetchone():
+            n += 1
+            name = f"{base}_{n}"
+        cur = CONN.execute(
+            "INSERT INTO personas(name, prompt, style, is_active, created_at, updated_at)"
+            " VALUES(?,?,?,0,?,?)", (name, prompt, style, now_str(), now_str()))
+        CONN.commit()
+        return {"ok": True, "persona_id": cur.lastrowid, "name": name,
+                "hint": "manage_persona set_active 启用；建议人工过一遍 prompt 补充说话风格与雷点"}
+
+
 PERSONA_CMDS = (
     ("/personahelp", "help"), ("/personas", "list"), ("/botstatus", "status"), ("/persona", "switch"),
     ("切换人格", "switch"), ("人格列表", "list"), ("机器人状态", "status"), ("人格指令", "help"),
@@ -1092,6 +1284,9 @@ TOOLS = {
     "poke_qq": (t_poke_qq, "在 QQ 群里戳一戳某人（拟人化互动或回应被戳）。内置黑白名单与限频。", {"type": "object", "properties": {"group_id": {"type": "string"}, "user_id": {"type": "string"}}, "required": ["group_id", "user_id"]}),
     "send_wechat_sticker": (t_send_wechat_sticker, "微信发送本地表情包图片（需先校准 4 组点击坐标，见报错提示与 wechat-adb-setup 技能）。内置拟人延迟与限频。", {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}),
     "extract_video_frames": (t_extract_video_frames, "视频抽帧：对已下载到本地的视频均匀抽取若干帧返回图片路径，再用 Read 逐帧理解内容。需要 ffmpeg（winget install Gyan.FFmpeg）。", {"type": "object", "properties": {"video_path": {"type": "string"}, "frames": {"type": "number", "default": 4}}, "required": ["video_path"]}),
+    "prune_memory": (t_prune_memory, "遗忘曲线清理：删除遗忘得分低于 keep_score 且重要级<=3 的旧记忆（重要级>=4 永不清理）。先 dry_run=true 预览。", {"type": "object", "properties": {"keep_score": {"type": "number", "default": 1.0}, "dry_run": {"type": "boolean", "default": True}, "limit": {"type": "number", "default": 500}}}),
+    "import_sillytavern": (t_import_sillytavern, "导入 SillyTavern 角色卡为人格：.json 或带 tEXt chara 数据的 .png。重名自动加后缀。", {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}),
+    "flush_outbox": (t_flush_outbox, "补发队列：NapCat 掉线期间排队的消息在恢复后重发，超过 max_age_min 分钟的过期丢弃。每轮心跳结束时应调用一次。", {"type": "object", "properties": {"max_age_min": {"type": "number", "default": 30}}}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}

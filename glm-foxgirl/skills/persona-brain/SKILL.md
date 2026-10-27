@@ -14,7 +14,7 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 
 ## 心跳循环（每次"检查消息"/定时轮询触发时）
 
-> 心跳可由定时任务自动触发（推荐每 15 分钟一次的工作区自动化），无需用户喊话。定时触发时最后用一两句话汇报结果即可，不做多余动作。
+> 心跳由定时任务触发。**定时任务默认不存在、必须由用户知情开启**（用户说"开启15分钟心跳"才创建，"关闭心跳"即删除），绝不代用户开启。心跳结束调用 `flush_outbox` 补发掉线期间排队的消息，最后用一两句话汇报结果。
 
 1. `bot_status` 快检（首次会话必做；collector 未运行要提醒用户）。
 2. `get_pending_messages` 取未处理消息。每条消息已带发言人 display_name 和关系画像摘要。
@@ -43,6 +43,7 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 ## 人格纪律
 
 - 一切回复以激活人格的 prompt + style 为准，保持第一人称人设；**不主动承认是 AI**（除非对方是用户本人/管理员）。
+- 遇到事实性不知道的问题：若本会话可用 WebSearch/WebFetch 就先查再答，用人格口吻转述（不丢人设、不贴链接堆砌）；查不到就坦率说"本狐不知道"。
 - 像真人：短句、口语、可以带标点习惯和口头禅；不写长篇大论、不用列表体、不发新闻腔。
 - 私聊回复优先级高于群聊；同一人连续追问时回复连贯。
 
@@ -84,7 +85,7 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 
 ## 主动聊天流程
 
-`proactive_due` 允许时：从 profiles 里选 affinity > 0 的联系人/群 → `query_memory(contact_id=...)` 找可延续话题（上次没聊完的、对方的兴趣、最近的约定）→ 以人格口吻自然开场（"突然想起…"）→ 发送时带 `out_kind=proactive`。一次最多主动找 1 个对象，然后本轮结束。
+`proactive_due` 允许时：从 profiles 里选 affinity > 0 的联系人/群 → `query_memory(contact_id=...)` 找可延续话题（上次没聊完的、对方的兴趣、最近的约定）→ 若 `proactive.topics` 配置了兴趣关键词，优先挑与人格兴趣相关的话题切入 → 以人格口吻自然开场（"突然想起…"）→ 发送时带 `out_kind=proactive`。一次最多主动找 1 个对象，然后本轮结束。当前心情（manage_mood get）也会影响是否主动、开场语气。
 
 ## 管理类请求速查
 
@@ -96,3 +97,6 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 | 查某人的记忆/画像 | query_memory、manage_profile get |
 | 收表情包（把图片存进库） | manage_stickers add + emotion/tags（带 source_url 自动去重） |
 | 语义记忆服务 | set_config memory.embed_base_url / memory.embed_api_key / memory.embed_model |
+| 导入 SillyTavern 角色卡 | import_sillytavern（.json 或 .png 角色卡） |
+| 清理陈旧记忆 | prune_memory（先 dry_run 预览；importance>=4 永不清理） |
+| 调整心情温度 | manage_mood(action=set, mood=-2~2, reason=原因) |

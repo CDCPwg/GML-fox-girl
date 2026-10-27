@@ -3,6 +3,7 @@
 
 Run: python tests/test_smoke.py
 """
+import base64
 import json
 import os
 import socket
@@ -15,6 +16,7 @@ import threading
 import time
 import urllib.request
 import zlib
+from datetime import datetime, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(ROOT, "server", "persona_mcp.py")
@@ -65,6 +67,40 @@ def start_embed_server(port=3977):
     return srv
 
 
+def start_fake_napcat(port=3999):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            out = b'{"status":"ok","retcode":0,"data":null}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def make_card_png(path, card):
+    def chunk(t, d):
+        c = t + d
+        return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+    payload = base64.b64encode(json.dumps(card).encode("utf-8"))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+                + chunk(b"tEXt", b"chara\x00" + payload)
+                + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+                + chunk(b"IEND", b""))
+
+
 class Client:
     def __init__(self, data_dir):
         env = dict(os.environ, PERSONA_BOT_DATA_DIR=data_dir, PYTHONIOENCODING="utf-8")
@@ -107,7 +143,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 24 个工具", len(tools) == 24, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 27 个工具", len(tools) == 27, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -251,6 +287,60 @@ def main():
                                           "source_url": "https://example.com/s1.jpg"})
     check("表情包按 URL 去重", data.get("ok") and not data.get("deduped")
           and data2.get("deduped") is True, (data, data2))
+
+    print("[v0.6] 遗忘曲线 / SillyTavern / 发送队列")
+    c.tool("store_memory", {"channel": "qq", "contact_id": "10001", "content": "顺口聊过的天气",
+                            "importance": 2, "emotion": -3})
+    data, _ = c.tool("query_memory", {"keyword": "天气"})
+    check("情绪效价随记忆存储", data["memories"][0].get("emotion") == -3, data)
+
+    old_ts = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(os.path.join(tmp, "persona.db"))
+    conn.execute("UPDATE memories SET created_at=? WHERE content LIKE ?", (old_ts, "%开黑打王者%"))
+    conn.commit()
+    conn.close()
+    data, _ = c.tool("query_memory", {"contact_id": "10001", "limit": 50})
+    top = data["memories"][0]
+    kaihei = next(m for m in data["memories"] if "开黑" in m["content"])
+    check("遗忘曲线：旧记忆衰减不再置顶", "开黑" not in top["content"] and kaihei["score"] < 0.2,
+          (top["content"], kaihei["score"]))
+
+    data, _ = c.tool("prune_memory", {"keep_score": 3.5})
+    check("遗忘清理预览(dry_run)", data.get("would_delete", 0) >= 3
+          and all("开黑" not in s[2] for s in data.get("samples", [])), data)
+    data, _ = c.tool("prune_memory", {"keep_score": 3.5, "dry_run": False})
+    check("遗忘清理执行", data.get("deleted", 0) >= 3, data)
+    data, _ = c.tool("query_memory", {"keyword": "开黑"})
+    check("重要级4记忆不被清理", data.get("count") == 1, data)
+
+    card = {"spec": "chara_card_v2", "data": {"name": "猫娘雪糕", "description": "一只懒洋洋的猫娘",
+                                              "personality": "嗜睡、贪吃", "scenario": "午后的宠物店"}}
+    card_path = os.path.join(tmp, "card.json")
+    with open(card_path, "w", encoding="utf-8") as f:
+        json.dump(card, f, ensure_ascii=False)
+    data, err = c.tool("import_sillytavern", {"file_path": card_path})
+    check("ST 角色卡 JSON 导入", not err and data.get("name") == "猫娘雪糕", (err, data))
+    data, _ = c.tool("manage_persona", {"action": "list"})
+    xuegao = next((p for p in data["personas"] if p["name"] == "猫娘雪糕"), {})
+    check("ST 卡字段映射进 prompt", "懒洋洋的猫娘" in xuegao.get("prompt", "")
+          and "嗜睡" in xuegao.get("prompt", "") and "宠物店" in xuegao.get("prompt", ""), xuegao)
+    png_card = os.path.join(tmp, "card.png")
+    make_card_png(png_card, card)
+    data, err = c.tool("import_sillytavern", {"file_path": png_card})
+    check("ST 角色卡 PNG 导入(重名唯一化)", not err and data.get("name") == "猫娘雪糕_2", (err, data))
+
+    c.tool("configure_channel", {"channel": "qq", "enabled": True,
+                                 "napcat_base_url": "http://127.0.0.1:3998"})
+    data, _ = c.tool("send_qq_message", {"chat_type": "private", "chat_id": "10001", "text": "补发测试"})
+    check("NapCat 不可达时进入发送队列", data.get("queued") is True, data)
+    data, _ = c.tool("bot_status")
+    check("状态显示队列与 intro 标记", data["counts"].get("outbox") == 1
+          and "intro_shown" in data, data)
+    nap = start_fake_napcat(3999)
+    c.tool("configure_channel", {"channel": "qq", "napcat_base_url": "http://127.0.0.1:3999"})
+    data, _ = c.tool("flush_outbox")
+    check("恢复后补发成功", data.get("sent") == 1 and data.get("remaining") == 0, data)
+    nap.shutdown()
 
     c.close()
     time.sleep(1.0)
