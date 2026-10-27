@@ -4,14 +4,14 @@
     {
       "name": "glm-foxgirl",
       "source": "./glm-foxgirl",
-      "version": "0.7.0",
+      "version": "0.9.0",
       "description": "GLM Foxgirl persona companion bot for QQ and WeChat: ZCode acts as the brain; NapCat carries QQ traffic; ADB drives WeChat on an emulator or USB phone. Persona library with hot-switching commands, semantic vector memory, video frame understanding, sticker auto-collection, poke interactions, SQLite long-term memory, relationship profiles, blacklist/whitelist, human-like rate limiting, proactive chat, scheduled heartbeat.",
       "displayName": "GLM狐狸娘",
       "displayName_i18n": {
         "zh-CN": "GLM狐狸娘"
       },
       "description_i18n": {
-        "zh-CN": "GLM狐狸娘 · QQ/微信人格机器人：人格库热切换（聊天内管理员指令 + 后台指令）、语义向量记忆、视频抽帧识别、表情包自动收集、戳一戳、关系画像、黑白名单、拟人防风控、主动聊天、定时心跳。QQ 走 NapCat 协议，微信走 ADB（模拟器/USB 真机）。"
+        "zh-CN": "GLM狐狸娘 · QQ/微信人格机器人：人格库热切换、语义向量记忆+遗忘曲线、记忆图、无障碍读屏精确发言人、视频抽帧识别、表情包自动收集、戳一戳、关系画像、黑白名单、拟人防风控、发送队列、本地 WebUI。QQ 走 NapCat 协议，微信走 ADB。"
       },
       "category": "other"
     }
