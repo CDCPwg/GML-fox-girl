@@ -18,14 +18,15 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 2. `get_pending_messages` 取未处理消息。每条消息已带发言人 display_name 和关系画像摘要。
 3. **逐条处理**，顺序执行 4-9。
 4. `check_access`（channel, chat_type, chat_id, contact_id）——黑名单命中或不在白名单：**直接跳过**，不回复、不记忆。
-5. 群聊先做**回复必要性判断**（见下节）；决定不回就只沉淀记忆、更新画像。
-6. 取上下文：`manage_persona(action=list)` 里取 active 人格的 prompt+style；`query_memory(keyword=话题关键词, contact_id=发言人)`；`manage_profile(action=get)`。
-7. **多媒体处理**：
+5. **管理指令检查**：调用 `bot_command(text, channel, contact_id, chat_id)`。返回 `handled=true`：allowed=false（非管理员）或有 reply 就按原渠道把 reply 发出去（这就是管理员在 QQ/微信里热切换人格的入口），然后 `mark_processed` 结束本条；`handled=false` 继续正常流程。
+6. 群聊先做**回复必要性判断**（见下节）；决定不回就只沉淀记忆、更新画像。
+7. 取上下文：`manage_persona(action=list)` 里取 active 人格的 prompt+style（**每轮消息都现取，人格热切换即时生效**）；`query_memory(keyword=话题关键词, contact_id=发言人)`；`manage_profile(action=get)`。
+8. **多媒体处理**：
    - image 类型：`download_media` 下载后用 Read 识图，再决定怎么回。
    - 认出是表情包：理解其情绪，可用 `pick_sticker(emotion)` 选一张回敬。
    - 微信：先 `wechat_screenshot` + Read 确认当前聊天，再操作。
-8. 以**人格口吻**生成回复并 `send_qq_message`（QQ）或 `send_wechat_message`（微信）。工具内部已做黑白名单二次校验、随机延迟、限频——**不要**为了"快点"绕过或连续调用轰炸。想配图就 `pick_sticker` 后传 `image_path`。
-9. 沉淀：`store_memory`（有价值的才记）+ `manage_profile(action=upsert, impression=新增量, affinity_delta=±)` + `mark_processed`。
+9. 以**人格口吻**生成回复并 `send_qq_message`（QQ）或 `send_wechat_message`（微信）。工具内部已做黑白名单二次校验、随机延迟、限频——**不要**为了"快点"绕过或连续调用轰炸。想配图就 `pick_sticker` 后传 `image_path`。
+10. 沉淀：`store_memory`（有价值的才记）+ `manage_profile(action=upsert, impression=新增量, affinity_delta=±)` + `mark_processed`。
 
 ## 群聊回复必要性判断
 
@@ -52,6 +53,21 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 - "把 XX 拉黑"：需要 channel（qq/wechat）+ QQ号/群号；拉群用 `scope=group`；`manage_rules(action=add, list_type=blacklist, ...)`。
 - "只允许某些人聊"：加 whitelist；**白名单非空时未列入者一律拒绝**。
 - 改名单后可对最近消息 `mark_processed` 防止回溯回复。
+
+## 人格库与管理指令（热切换）
+
+- 人格库存于外部 SQLite，可建任意多个人格。`manage_persona` 全动作：list / create / update / set_active / delete / **export** / **import**（JSON 文件存 `~/.persona-bot/personas/`，可备份、可分享）。
+- **后台热切换**：用户发 `/persona-switch <名称>`，或直接说"切换到 XX 人格"→ `manage_persona(action=set_active)`。
+- **QQ/微信内热切换**：管理员在聊天里发指令，下一句话就换人格，无需重启：
+  | 指令 | 作用 |
+  |---|---|
+  | `切换人格 <名称>`（/persona） | 热切换激活人格 |
+  | `人格列表`（/personas） | 查看库与当前激活（▶） |
+  | `机器人状态`（/botstatus） | 待处理/记忆/规则/表情包数量 |
+  | `人格指令`（/personahelp） | 帮助 |
+- 管理员名单在配置 `admin.qq` / `admin.wechat`（逗号分隔多个 ID）：`set_config(key="admin.qq", value="10001,10002")`。**未配置前所有聊天内指令都会被拒**；管理员不要加进黑名单。
+- 心跳循环第 5 步已让每条消息先过 `bot_command`；管理员发的普通聊天不受影响（handled=false 会走正常人格流程）。
+- 切换成功后，若在群聊/私聊里执行，可用**新人格的口吻**自然地接一句话，不要说"系统已切换"这类系统腔。
 
 ## 记忆与画像规范
 

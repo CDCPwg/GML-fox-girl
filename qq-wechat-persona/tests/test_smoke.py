@@ -79,7 +79,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 20 个工具", len(tools) == 20, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 21 个工具", len(tools) == 21, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -159,6 +159,37 @@ def main():
     c.tool("mark_processed", {"message_ids": ids})
     data, _ = c.tool("get_pending_messages")
     check("标记已处理后清空收件箱", data.get("count") == 0, data)
+
+    print("[persona library] 人格库与管理指令")
+    data, _ = c.tool("manage_persona", {"action": "create", "name": "阿玲",
+                                        "prompt": "你叫阿玲，25岁插画师，说话温柔慢热，喜欢猫。",
+                                        "style": "轻声细语"})
+    check("创建第二个人格", data.get("ok"), data)
+    data, _ = c.tool("bot_command", {"text": "今天天气不错", "channel": "qq", "contact_id": "10001"})
+    check("普通聊天不触发指令", data.get("handled") is False, data)
+    data, _ = c.tool("bot_command", {"text": "人格列表", "channel": "qq", "contact_id": "99999"})
+    check("非管理员被拒", data.get("handled") is True and data.get("allowed") is False, data)
+    c.tool("set_config", {"key": "admin.qq", "value": "10001"})
+    data, _ = c.tool("bot_command", {"text": "人格列表", "channel": "qq", "contact_id": "10001"})
+    check("管理员查看人格库", data.get("allowed") is True and "小婉" in data.get("reply", ""), data)
+    data, _ = c.tool("bot_command", {"text": "切换人格阿玲", "channel": "qq", "contact_id": "10001"})
+    check("管理员热切换人格", data.get("ok") is True and data.get("data", {}).get("active") == "阿玲", data)
+    data, _ = c.tool("manage_persona", {"action": "list"})
+    check("切换后激活人格生效", data.get("active") == "阿玲", data)
+    data, _ = c.tool("bot_command", {"text": "切换人格 幽灵", "channel": "qq", "contact_id": "10001"})
+    check("切换不存在人格被拦截", data.get("ok") is False and "现有" in data.get("reply", ""), data)
+    data, _ = c.tool("bot_command", {"text": "机器人状态", "channel": "qq", "contact_id": "10001"})
+    check("状态指令", data.get("action") == "status"
+          and data.get("data", {}).get("pending_messages") == 0, data)
+    data, _ = c.tool("manage_persona", {"action": "export", "name": "阿玲"})
+    exported = data.get("file", "")
+    check("导出人格 JSON", data.get("ok") and os.path.exists(exported), data)
+    c.tool("manage_persona", {"action": "delete", "name": "阿玲"})
+    data, _ = c.tool("manage_persona", {"action": "import", "file_path": exported})
+    check("导入人格(原名恢复)", data.get("name") == "阿玲", data)
+    data, _ = c.tool("manage_persona", {"action": "import", "file_path": exported})
+    check("重名导入自动唯一化", data.get("name") == "阿玲_2", data)
+
     c.close()
     time.sleep(1.0)
 

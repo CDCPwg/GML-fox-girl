@@ -850,8 +850,11 @@ def t_bot_command(text, channel="", contact_id="", chat_id="", **_):
         return {"handled": False}
     admins_cfg = load_config().get("admin", {}).get(channel) or []
     if isinstance(admins_cfg, str):
-        admins_cfg = [a.strip() for a in admins_cfg.split(",") if a.strip()]
-    if str(contact_id) not in {str(a) for a in admins_cfg}:
+        admins_cfg = admins_cfg.split(",")
+    if isinstance(admins_cfg, (int, float)):
+        admins_cfg = [admins_cfg]
+    admins = {str(a).strip() for a in admins_cfg if str(a).strip()}
+    if str(contact_id) not in admins:
         return {"handled": True, "allowed": False, "action": action,
                 "reply": "这条指令只有管理员能用。"}
     with LOCK:
@@ -874,10 +877,10 @@ def t_bot_command(text, channel="", contact_id="", chat_id="", **_):
         if action == "list":
             rows = [dict(r) for r in CONN.execute(
                 "SELECT name, style, is_active FROM personas ORDER BY is_active DESC, id")]
-        lines = [f"{'▶ ' if r['is_active'] else '· '}{r['name']}" + (f"（{r['style'][:20]}）" if r["style"] else "")
-                 for r in rows]
-        return {"handled": True, "allowed": True, "action": "list",
-                "reply": "人格库：\n" + "\n".join(lines) + "\n切换用：切换人格 <名称>"}
+            lines = [f"{'▶ ' if r['is_active'] else '· '}{r['name']}" + (f"（{r['style'][:20]}）" if r["style"] else "")
+                     for r in rows]
+            return {"handled": True, "allowed": True, "action": "list",
+                    "reply": "人格库：\n" + "\n".join(lines) + "\n切换用：切换人格 <名称>"}
     if action == "status":
         st = t_bot_status()
         data = {"active_persona": st.get("active_persona"),
