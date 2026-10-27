@@ -25,9 +25,10 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -93,6 +94,9 @@ CREATE TABLE IF NOT EXISTS graph_edges(
   id INTEGER PRIMARY KEY AUTOINCREMENT, src_id INTEGER NOT NULL, dst_id INTEGER NOT NULL,
   relation TEXT NOT NULL, weight INTEGER DEFAULT 1, note TEXT DEFAULT '', last_seen TEXT,
   UNIQUE(src_id, dst_id, relation));
+CREATE TABLE IF NOT EXISTS session_notes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT DEFAULT '', content TEXT NOT NULL,
+  created_at TEXT, updated_at TEXT);
 """
 
 
@@ -484,8 +488,10 @@ def t_bot_status(**_):
                        "stickers": one("SELECT COUNT(*) FROM stickers"),
                        "outbox": one("SELECT COUNT(*) FROM outbox"),
                        "graph_nodes": one("SELECT COUNT(*) FROM graph_nodes"),
-                       "graph_edges": one("SELECT COUNT(*) FROM graph_edges")},
+                       "graph_edges": one("SELECT COUNT(*) FROM graph_edges"),
+                       "notes": one("SELECT COUNT(*) FROM session_notes")},
             "intro_shown": bool(load_config().get("intro", {}).get("shown")),
+            "setup_completed": bool(load_config().get("setup", {}).get("completed_at")),
             "qq": {"enabled": cfg["qq"]["enabled"], "napcat_base_url": cfg["qq"]["napcat_base_url"],
                    "token_set": bool(cfg["qq"]["napcat_token"])},
             "wechat": {"enabled": cfg["wechat"]["enabled"], "adb_path": cfg["wechat"]["adb_path"],
@@ -1415,6 +1421,84 @@ def t_wechat_read_notifications(raw_text=None, **_):
             "hint": "捞到的新消息可按 channel=wechat 走心跳循环处理；通知会聚合，同一人连发多句可能合并成一条"}
 
 
+def t_session_note(action="list", note_id=None, title="", content="", limit=5, **_):
+    """会话接力笔记：换新对话前由大脑总结本会话存档，新对话开机读取即可接上。"""
+    with LOCK:
+        if action == "save":
+            if not content:
+                raise ValueError("content 不能为空")
+            cur = CONN.execute(
+                "INSERT INTO session_notes(title, content, created_at, updated_at) VALUES(?,?,?,?)",
+                (title or now_str()[:10] + " 接力", content, now_str(), now_str()))
+            CONN.commit()
+            return {"ok": True, "note_id": cur.lastrowid}
+        if action == "get":
+            if not note_id:
+                raise ValueError("get 需要 note_id")
+            row = CONN.execute("SELECT * FROM session_notes WHERE id=?", (int(note_id),)).fetchone()
+            return {"note": dict(row) if row else None}
+        if action == "list":
+            rows = [dict(r) for r in CONN.execute(
+                "SELECT id, title, substr(content, 1, 150) AS preview, created_at FROM session_notes"
+                " ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 50)),))]
+            return {"notes": rows}
+        if action == "delete":
+            if not note_id:
+                raise ValueError("delete 需要 note_id")
+            CONN.execute("DELETE FROM session_notes WHERE id=?", (int(note_id),))
+            CONN.commit()
+            return {"ok": True}
+    raise ValueError(f"未知 action: {action}")
+
+
+def t_search_messages(keyword="", channel="", contact_id="", chat_id="", since="", until="",
+                      limit=50, **_):
+    """追溯查找全部收发记录（永久保留）：关键词/渠道/联系人/会话/时间范围。"""
+    q, args = "SELECT * FROM messages WHERE 1=1", []
+    if keyword:
+        q += " AND (content LIKE ? OR display_name LIKE ?)"
+        args += [f"%{keyword}%", f"%{keyword}%"]
+    if channel:
+        q += " AND channel=?"
+        args.append(channel)
+    if contact_id:
+        q += " AND contact_id=?"
+        args.append(str(contact_id))
+    if chat_id:
+        q += " AND chat_id=?"
+        args.append(str(chat_id))
+    if since:
+        q += " AND created_at>=?"
+        args.append(since)
+    if until:
+        q += " AND created_at<=?"
+        args.append(until + (" 23:59:59" if len(until) == 10 else ""))
+    q += " ORDER BY id DESC LIMIT ?"
+    args.append(max(1, min(int(limit), 200)))
+    with LOCK:
+        rows = [dict(r) for r in CONN.execute(q, args).fetchall()]
+    return {"count": len(rows), "messages": rows,
+            "hint": "收发记录永久保留可追溯；WebUI'记录'页同样可查；export_transcript 可导出 Markdown 存档"}
+
+
+def t_export_transcript(since="", until="", channel="", chat_id="", **_):
+    """把一段时间的收发记录导出为 Markdown 存档（时间正序）。"""
+    data = t_search_messages(channel=channel, chat_id=chat_id, since=since, until=until, limit=200)
+    rows = list(reversed(data["messages"]))
+    tdir = os.path.join(DATA_DIR, "transcripts")
+    os.makedirs(tdir, exist_ok=True)
+    path = os.path.join(tdir, f"transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# 对话记录导出（{now_str()}）\n\n- 范围：{since or '起'} ~ {until or '今'}"
+                f"｜渠道：{channel or '全部'}｜会话：{chat_id or '全部'}\n- 条数：{len(rows)}\n\n")
+        for r in rows:
+            who = r.get("display_name") or r.get("contact_id") or "?"
+            arrow = "→发" if r["direction"] == "out" else "←收"
+            f.write(f"- `{r['created_at']}` {arrow} **{who}** ({r['channel']}/{r['chat_type']})："
+                    f"{r['content']}\n")
+    return {"ok": True, "path": path, "count": len(rows)}
+
+
 PERSONA_CMDS = (
     ("/personahelp", "help"), ("/personas", "list"), ("/botstatus", "status"), ("/persona", "switch"),
     ("切换人格", "switch"), ("人格列表", "list"), ("机器人状态", "status"), ("人格指令", "help"),
@@ -1511,6 +1595,9 @@ TOOLS = {
     "graph_query": (t_graph_query, "记忆图查询：entity=实体名 从该实体 BFS 扩散 depth 层（1-3），返回关联的人/事/偏好；entity 留空返回按关联度排序的总览。回复前对消息里出现的具体对象调用它可带出联想。", {"type": "object", "properties": {"entity": {"type": "string"}, "depth": {"type": "number", "default": 1}, "limit": {"type": "number", "default": 60}}}),
     "wechat_read_screen": (t_wechat_read_screen, "无障碍层级读屏：对连接的模拟器/真机执行 uiautomator dump，返回当前屏幕的精确文字节点（无 OCR 误差，群昵称通常单独成节点）。传 xml_text 可离线解析。", {"type": "object", "properties": {"xml_text": {"type": "string"}}}),
     "wechat_read_notifications": (t_wechat_read_notifications, "从微信通知栏补捞后台错过的消息（私聊=昵称+内容，群聊=群名+昵称+内容）。需要微信通知权限开启。传 raw_text 可离线解析。", {"type": "object", "properties": {"raw_text": {"type": "string"}}}),
+    "session_note": (t_session_note, "会话接力笔记：换新对话前 save 一份本会话工作总结，新对话开机 list/get 最近几条即可接上脉络（记忆已外置，换页无损）。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["save", "get", "list", "delete"]}, "note_id": {"type": "number"}, "title": {"type": "string"}, "content": {"type": "string"}, "limit": {"type": "number", "default": 5}}}),
+    "search_messages": (t_search_messages, "追溯查找全部收发记录：关键词/渠道/联系人/会话/时间范围，记录永久保留。", {"type": "object", "properties": {"keyword": {"type": "string"}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}, "since": {"type": "string"}, "until": {"type": "string"}, "limit": {"type": "number", "default": 50}}}),
+    "export_transcript": (t_export_transcript, "把一段时间的收发记录导出为 Markdown 存档（存 ~/.persona-bot/transcripts/），返回文件路径。", {"type": "object", "properties": {"since": {"type": "string"}, "until": {"type": "string"}, "channel": {"type": "string"}, "chat_id": {"type": "string"}}}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}
@@ -1541,9 +1628,12 @@ small{color:#888}
 <nav id="tabs"></nav><main id="view"></main>
 <script>
 let S=null,tab='状态';
-const tabs=['状态','人格','记忆','画像','黑白名单','表情包','统计'];
+const tabs=['状态','人格','记忆','画像','黑白名单','表情包','记录','统计'];
 function esc(s){return (s==null?'':''+s).replace(/</g,'&lt;')}
 async function act(path,body){await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});load()}
+async function loadMsgs(){const k=document.getElementById('qk').value,c=document.getElementById('qc').value;
+ const d=await (await fetch('/api/messages?keyword='+encodeURIComponent(k)+'&contact_id='+encodeURIComponent(c)+'&limit=100')).json();
+ document.getElementById('msgbox').innerHTML=(d.messages||[]).map(m=>'<tr><td>'+m.created_at+'</td><td>'+(m.direction==='out'?'→发':'←收')+'</td><td>'+esc(m.channel)+'</td><td>'+esc(m.display_name||m.contact_id||'')+'</td><td>'+esc(m.content)+(m.media_url?' <small>'+esc(m.media_url)+'</small>':'')+'</td></tr>').join('')||'<tr><td colspan="5">无结果</td></tr>'}
 async function load(){S=await (await fetch('/api/state')).json();document.getElementById('ver').textContent='v'+S.status.version;render()}
 function nav(){document.getElementById('tabs').innerHTML=tabs.map(t=>`<button class="${t===tab?'on':''}" onclick="tab='${t}';nav();render()">${t}</button>`).join('')}
 function render(){const v=document.getElementById('view');
@@ -1570,6 +1660,13 @@ function render(){const v=document.getElementById('view');
   '<td><button class="del" onclick="act(\'/api/rules/remove\',{list_type:\''+r.list_type+'\',scope:\''+r.scope+'\',channel:\''+r.channel+'\',target_id:\''+esc(r.target_id)+'\'})">删除</button></td></tr>').join('')+'</table>'}
  if(tab==='表情包'){v.innerHTML='<table><tr><th>情绪</th><th>标签</th><th>路径</th><th>使用</th></tr>'+
   S.stickers.stickers.map(s=>'<tr><td>'+esc(s.emotion)+'</td><td>'+esc(s.tags)+'</td><td>'+esc(s.file_path)+'</td><td>'+s.use_count+'</td></tr>').join('')+'</table>'}
+ if(tab==='记录'){v.innerHTML='<div>搜索：<input id="qk" placeholder="关键词/昵称" size="14">'+
+  '<input id="qc" placeholder="联系人ID" size="10"> <button class="act" onclick="loadMsgs()">查找</button> '+
+  '<small>收发记录永久保留，可追溯；导出用 export_transcript</small></div>'+
+  '<table><tr><th>时间</th><th>向</th><th>渠道</th><th>对象</th><th>内容</th></tr><tbody id="msgbox"></tbody></table>'+
+  '<h3>接力笔记</h3><table><tr><th>时间</th><th>标题 / 预览</th></tr>'+
+  S.notes.notes.map(n=>'<tr><td>'+esc(n.created_at)+'</td><td><b>'+esc(n.title)+'</b><br>'+esc(n.preview)+'</td></tr>').join('')+'</table>';
+  loadMsgs()}
  if(tab==='统计'){const w=S.stats.week;v.innerHTML='<div class="kpi">'+
   '<div>7天收<b>'+w['in']+'</b></div><div>7天发<b>'+w['out']+'</b></div><div>回复率<b>'+w['reply_rate']+'</b></div>'+
   '<div>主动<b>'+w['proactive']+'</b></div><div>心情<b>'+S.stats.mood+'</b></div></div>'+
@@ -1605,7 +1702,20 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         "stickers": t_manage_stickers(action="list"),
                         "memories": t_query_memory(limit=50),
                         "stats": t_get_stats(),
+                        "notes": t_session_note(action="list", limit=10),
                         "status": t_bot_status()})
+        elif self.path.startswith("/api/messages"):
+            qs = parse_qs(urlsplit(self.path).query)
+
+            def q1(key, default=""):
+                return (qs.get(key) or [default])[0]
+            try:
+                lim = int(q1("limit", "100") or 100)
+            except ValueError:
+                lim = 100
+            self._json(t_search_messages(keyword=q1("keyword"), channel=q1("channel"),
+                                         contact_id=q1("contact_id"), chat_id=q1("chat_id"),
+                                         since=q1("since"), until=q1("until"), limit=lim))
         else:
             self._json({"error": "not found"}, 404)
 

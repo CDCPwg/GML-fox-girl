@@ -143,7 +143,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 33 个工具", len(tools) == 33, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 36 个工具", len(tools) == 36, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -430,6 +430,29 @@ def main():
     check("通知解析私聊且过滤其他应用", any(m.get("speaker") == "小明"
                                           and m.get("text") == "私聊内容测试" for m in msgs)
           and len(msgs) == 2, data)
+
+    print("[v0.10] 会话接力 / 记录追溯 / 专用工作区")
+    data, _ = c.tool("session_note", {"action": "save", "title": "测试接力",
+                                      "content": "处理了阿明的开黑邀约；待跟进：猫粮品牌"})
+    nid = data.get("note_id")
+    check("接力笔记保存", data.get("ok") and nid, data)
+    data, _ = c.tool("session_note", {"action": "get", "note_id": nid})
+    check("接力笔记读取", "猫粮品牌" in (data.get("note") or {}).get("content", ""), data)
+    data, _ = c.tool("session_note", {"action": "list", "limit": 5})
+    check("接力笔记列表", any(n["id"] == nid for n in data.get("notes", [])), data)
+    data, _ = c.tool("search_messages", {"keyword": "补发"})
+    check("记录追溯：关键词命中发送日志", data.get("count", 0) >= 1
+          and any(m["direction"] == "out" for m in data["messages"]), data)
+    data, _ = c.tool("search_messages", {"keyword": "开黑", "since": "2099-01-01"})
+    check("记录追溯：时间过滤", data.get("count") == 0, data)
+    data, _ = c.tool("export_transcript")
+    check("导出 Markdown 存档", data.get("ok") and os.path.exists(data.get("path", ""))
+          and data.get("count", 0) >= 1, data)
+    data, _ = c.tool("bot_status")
+    check("状态含接力笔记计数", "notes" in data["counts"], data["counts"])
+    c.tool("set_config", {"key": "setup.completed_at", "value": "2026-10-28 12:00"})
+    data, _ = c.tool("bot_status")
+    check("配置页完成标记", data.get("setup_completed") is True, data)
 
     c.close()
     time.sleep(1.0)
