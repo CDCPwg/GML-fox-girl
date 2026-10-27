@@ -6,6 +6,7 @@ Run: python tests/test_smoke.py
 import base64
 import json
 import os
+import re
 import socket
 import sqlite3
 import struct
@@ -143,7 +144,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 39 个工具", len(tools) == 39, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 40 个工具", len(tools) == 40, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -474,10 +475,10 @@ def main():
     r2 = subprocess.run([sys.executable, script], env=hook_env, capture_output=True, timeout=30)
     with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
         cfgj = json.load(f)
-    check("hook 首次输出速览v3并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
+    check("hook 首次输出速览并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
           and "自动交接" in r1.stdout.decode("utf-8", "replace")
           and (cfgj.get("session") or {}).get("turns") == 0
-          and cfgj.get("intro", {}).get("version") == 4, cfgj.get("session"))
+          and cfgj.get("intro", {}).get("version") == 5, cfgj.get("session"))
     check("hook 二次静默", r2.stdout.decode("utf-8", "replace").strip() == "", r2.stdout)
 
     print("[v0.12] 管理守卫 / 95%提醒 / 远程交接")
@@ -515,6 +516,46 @@ def main():
           and data.get("estimated_pct") == 95 and data.get("auto_handover") is True, data)
     data, _ = c.tool("bot_status")
     check("状态含守卫计数", data["counts"].get("guard") == 3, data["counts"])
+
+    print("[v0.13] QQ/WX 账号关联器")
+    c.tool("manage_profile", {"action": "upsert", "channel": "wechat", "contact_id": "wx_aming",
+                              "display_name": "阿明微信", "impression": "微信端印象：喜欢摄影和做饭",
+                              "affinity": 5})
+    data, _ = c.tool("link_accounts", {"action": "request", "channel": "qq", "contact_id": "10001",
+                                       "peer_channel": "wechat", "peer_contact_id": "wx_aming"})
+    check("发起关联请求并生成6位确认码", data.get("ok")
+          and re.match(r"^\d{6}$", data.get("code", "")) is not None, data)
+    code = data.get("code", "")
+    data, err = c.tool("link_accounts", {"action": "confirm", "channel": "qq",
+                                         "contact_id": "10001", "code": code})
+    check("发起方不能自我确认", err and "对方账号" in data.get("error", ""), (err, data))
+    data, _ = c.tool("link_accounts", {"action": "confirm", "channel": "wechat",
+                                       "contact_id": "wx_aming", "code": code})
+    check("画像不相似走冲突流程", data.get("status") == "conflict" and data.get("request_id"), data)
+    rid = data.get("request_id")
+    data, _ = c.tool("link_accounts", {"action": "resolve", "request_id": rid, "choice": "a"})
+    check("冲突解决：保留发起方版本", data.get("status") == "linked", data)
+    data, _ = c.tool("manage_profile", {"action": "get", "channel": "wechat", "contact_id": "wx_aming"})
+    check("微信画像已继承QQ版", "游戏好友" in (data.get("profile") or {}).get("impression", ""), data)
+    data, _ = c.tool("link_accounts", {"action": "ids", "channel": "qq", "contact_id": "10001"})
+    ids = [i for _, i in data.get("identities", [])]
+    check("身份组互联", "wx_aming" in ids, data)
+    data, _ = c.tool("query_memory", {"channel": "wechat", "contact_id": "wx_aming", "keyword": "开黑"})
+    check("记忆按身份组互联检索", data.get("count", 0) >= 1, data)
+    data, _ = c.tool("link_accounts", {"action": "unlink", "channel": "qq", "contact_id": "10001",
+                                       "peer_channel": "wechat", "peer_contact_id": "wx_aming"})
+    check("解除关联", data.get("removed") == 1, data)
+    c.tool("manage_profile", {"action": "upsert", "channel": "wechat", "contact_id": "wx_10002",
+                              "display_name": "老王微信", "impression": "从微信继承的印象", "affinity": 2})
+    data, _ = c.tool("link_accounts", {"action": "request", "channel": "qq", "contact_id": "10002",
+                                       "peer_channel": "wechat", "peer_contact_id": "wx_10002"})
+    code2 = data.get("code", "")
+    data, _ = c.tool("link_accounts", {"action": "confirm", "channel": "wechat",
+                                       "contact_id": "wx_10002", "code": code2})
+    check("单侧画像直接继承(无冲突)", data.get("status") == "linked"
+          and data.get("profile_inherited") is True, data)
+    data, _ = c.tool("manage_profile", {"action": "get", "channel": "qq", "contact_id": "10002"})
+    check("QQ侧拿到微信画像", "从微信继承" in (data.get("profile") or {}).get("impression", ""), data)
 
     c.close()
     time.sleep(1.0)
