@@ -1,6 +1,6 @@
 {
   "name": "qq-wechat-persona",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persona companion bot for QQ and WeChat: ZCode acts as the brain; NapCat carries QQ traffic; ADB drives WeChat on an emulator or USB phone. Includes persona management, SQLite long-term memory, per-contact relationship profiles, sticker library, blacklist/whitelist enforcement, human-like rate limiting and proactive chat policy.",
   "author": { "name": "local-dev" },
   "skills": "./skills",

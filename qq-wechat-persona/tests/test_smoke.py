@@ -5,6 +5,7 @@ Run: python tests/test_smoke.py
 """
 import json
 import os
+import socket
 import sqlite3
 import struct
 import subprocess
@@ -161,24 +162,33 @@ def main():
     c.close()
     time.sleep(1.0)
 
-    print("[collector] 独立进程事件上报测试")
+    print("[collector] 独立进程事件上报测试（独立端口，避开真实部署占用的 3001）")
     tmp2 = tempfile.mkdtemp(prefix="persona_coll_")
+    coll_port = 3777
+    with open(os.path.join(tmp2, "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"collector": {"port": coll_port}}, f)
     env = dict(os.environ, PERSONA_BOT_DATA_DIR=tmp2, PYTHONIOENCODING="utf-8")
     coll = subprocess.Popen([sys.executable, SERVER, "--collector"], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1.5)
+    for _ in range(30):
+        try:
+            with socket.create_connection(("127.0.0.1", coll_port), timeout=0.3):
+                break
+        except OSError:
+            time.sleep(0.3)
+    url = f"http://127.0.0.1:{coll_port}/onebot/event"
     try:
         ev = {"post_type": "message", "message_type": "group", "group_id": 888, "user_id": 2001,
               "sender": {"card": "群友A", "nickname": "a2001"},
               "message": [{"type": "text", "data": {"text": "有人吗"}},
                           {"type": "image", "data": {"url": "https://example.com/x.jpg"}}]}
-        req = urllib.request.Request("http://127.0.0.1:3001/onebot/event",
+        req = urllib.request.Request(url,
                                      data=json.dumps(ev).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
         urllib.request.urlopen(req, timeout=5).read()
         ev2 = {"post_type": "message", "message_type": "private", "user_id": 2002,
                "sender": {"nickname": "b2002"}, "message": "[CQ:image,file=a.jpg,url=https://example.com/y.jpg]晚上好"}
-        req = urllib.request.Request("http://127.0.0.1:3001/onebot/event",
+        req = urllib.request.Request(url,
                                      data=json.dumps(ev2).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
         urllib.request.urlopen(req, timeout=5).read()
