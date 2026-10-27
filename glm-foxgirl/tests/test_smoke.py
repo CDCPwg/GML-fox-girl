@@ -144,7 +144,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 40 个工具", len(tools) == 40, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 43 个工具", len(tools) == 43, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -556,6 +556,42 @@ def main():
           and data.get("profile_inherited") is True, data)
     data, _ = c.tool("manage_profile", {"action": "get", "channel": "qq", "contact_id": "10002"})
     check("QQ侧拿到微信画像", "从微信继承" in (data.get("profile") or {}).get("impression", ""), data)
+
+    print("[v0.14] 反思机制 / 记忆冲突消解")
+    data, _ = c.tool("reflect_due", {})
+    check("反思到期检查可用", data.get("count") is not None, data)
+    for i in range(7):
+        c.tool("store_memory", {"channel": "qq", "contact_id": "10001",
+                                "content": f"阿明聊到第{i}次组队开黑的趣事", "importance": 3})
+    data, _ = c.tool("reflect_due", {})
+    ming = next((d for d in data["due"] if d["contact_id"] == "10001"), None)
+    check("新增记忆达标触发反思", bool(ming) and ming["new_count"] >= 8, data)
+    data, _ = c.tool("reflect_material", {"channel": "qq", "contact_id": "10001"})
+    check("反思素材齐全", bool(data.get("memories")) and bool(data.get("profile")), data)
+    c.tool("store_memory", {"channel": "qq", "contact_id": "10001", "kind": "reflection",
+                            "importance": 4, "content": "洞察：阿明热衷组队开黑，是关系的重要纽带"})
+    data, _ = c.tool("reflect_due", {})
+    ming = next((d for d in data["due"] if d["contact_id"] == "10001"), None)
+    check("反思后重置计数", ming is None, data)
+    data, _ = c.tool("store_memory", {"channel": "qq", "contact_id": "10001",
+                                      "content": "阿明现在在玩王者荣耀", "importance": 3})
+    aid = data.get("memory_id")
+    data, _ = c.tool("memory_conflicts", {"content": "阿明现在在玩原神", "contact_id": "10001"})
+    cand = next((x for x in data.get("candidates", []) if x["id"] == aid), None)
+    check("冲突候选识别", bool(cand) and cand.get("similarity", 0) >= 0.35, data)
+    data, _ = c.tool("store_memory", {"channel": "qq", "contact_id": "10001",
+                                      "content": "阿明现在在玩原神", "importance": 3,
+                                      "supersedes": [aid]})
+    bid = data.get("memory_id")
+    check("事实更新取代旧记忆", data.get("superseded") == [aid], data)
+    data, _ = c.tool("query_memory", {"keyword": "王者", "contact_id": "10001"})
+    check("被取代记忆默认不出现", all(m["id"] != aid for m in data.get("memories", [])), data)
+    data, _ = c.tool("query_memory", {"keyword": "原神", "contact_id": "10001"})
+    check("新事实可检索", data.get("count") == 1, data)
+    data, _ = c.tool("query_memory", {"keyword": "王者", "contact_id": "10001",
+                                      "include_superseded": True})
+    old = next((m for m in data.get("memories", []) if m["id"] == aid), None)
+    check("旧记忆保留可追溯", bool(old) and old.get("superseded_by") == bid, data)
 
     c.close()
     time.sleep(1.0)
