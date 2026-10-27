@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -47,7 +47,8 @@ DEFAULT_CONFIG = {
     "memory": {"embed_base_url": "", "embed_api_key": "", "embed_model": "embedding-3",
                "half_life_days": 30},
     "mood": {"current": 0, "reason": ""},
-    "limits": {"auto_handover_turns": 40, "auto_handover_enabled": True},
+    "limits": {"auto_handover_turns": 40, "auto_handover_enabled": True,
+               "warn_pct": 85, "handover_pct": 95, "auto_reopen": False},
     "video": {"ffmpeg_path": "ffmpeg"},
     "stickers": {"auto_collect": True},
     "wechat": {"enabled": False, "adb_path": "adb", "device_serial": "", "input_tap_x": 0,
@@ -98,6 +99,10 @@ CREATE TABLE IF NOT EXISTS graph_edges(
 CREATE TABLE IF NOT EXISTS session_notes(
   id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT DEFAULT '', content TEXT NOT NULL,
   created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS guard(
+  channel TEXT NOT NULL, contact_id TEXT NOT NULL, count INTEGER DEFAULT 0,
+  last_action TEXT DEFAULT '', last_at TEXT,
+  UNIQUE(channel, contact_id));
 """
 
 
@@ -490,7 +495,8 @@ def t_bot_status(**_):
                        "outbox": one("SELECT COUNT(*) FROM outbox"),
                        "graph_nodes": one("SELECT COUNT(*) FROM graph_nodes"),
                        "graph_edges": one("SELECT COUNT(*) FROM graph_edges"),
-                       "notes": one("SELECT COUNT(*) FROM session_notes")},
+                       "notes": one("SELECT COUNT(*) FROM session_notes"),
+                       "guard": one("SELECT COUNT(*) FROM guard")},
             "intro_shown": bool(load_config().get("intro", {}).get("shown")),
             "setup_completed": bool(load_config().get("setup", {}).get("completed_at")),
             "session": dict(load_config().get("session", {})),
@@ -1502,30 +1508,89 @@ def t_export_transcript(since="", until="", channel="", chat_id="", **_):
 
 
 def t_session_progress(note="", **_):
-    """会话进度标记：每轮用户交互/心跳处理完后调用。新会话由 SessionStart hook 归零。
-    达到 limits.auto_handover_turns（默认 40）时返回 auto_handover=true 触发自动交接：
-    大脑立即总结本会话 → session_note 存档 → 提示用户开新对话页（开新页需用户手动）。"""
+    """会话进度标记：每轮用户交互/心跳处理完后调用。按轮数折算上下文占用估算百分比：
+    warn_pct（默认85%）提醒，handover_pct（默认95%）触发自动交接。
+    新会话由 SessionStart hook 归零。开新页需用户手动，或 limits.auto_reopen=true 时由大脑建定时任务。"""
     cfg = load_config()
     lim = cfg.get("limits", {})
     if not lim.get("auto_handover_enabled", True):
-        return {"auto_handover": False, "reason": "limits.auto_handover_enabled=false"}
+        return {"level": "off", "auto_handover": False, "reason": "limits.auto_handover_enabled=false"}
     turns = int(cfg.get("session", {}).get("turns", 0)) + 1
-    threshold = max(1, int(lim.get("auto_handover_turns", 40)))
+    full_turns = max(1, int(lim.get("auto_handover_turns", 40)))
+    pct = min(100, round(turns / full_turns * 100))
+    warn_pct = max(1, min(99, int(lim.get("warn_pct", 85))))
+    handover_pct = max(warn_pct, min(100, int(lim.get("handover_pct", 95))))
     cfg.setdefault("session", {})
     cfg["session"]["turns"] = turns
+    cfg["session"]["estimated_pct"] = pct
     if note:
         cfg["session"]["last_note"] = note[:200]
     cfg["session"]["updated_at"] = now_str()
     save_config(cfg)
-    fire = turns >= threshold
-    return {"turns": turns, "threshold": threshold, "auto_handover": fire,
-            **({"hint": "已达自动交接阈值：立即总结本会话 → session_note(action=save) → "
-                        "提示用户新开对话页（新页需用户手动开）"} if fire else {})}
+    level = "handover" if pct >= handover_pct else ("warn" if pct >= warn_pct else "ok")
+    resp = {"turns": turns, "estimated_pct": pct, "warn_pct": warn_pct,
+            "handover_pct": handover_pct, "level": level,
+            "auto_handover": level == "handover",
+            "note": "pct 为按轮数折算的估算值（ZCode 未向插件暴露真实上下文百分比）"}
+    if level == "warn":
+        resp["hint"] = f"上下文约 {pct}%：用一句话提醒用户接近上限，建议说'交接'或开新页"
+    if level == "handover":
+        resp["hint"] = (f"上下文约 {pct}%：立即自动交接——总结本会话 → session_note(action=save) → "
+                        "提醒用户新开对话页；limits.auto_reopen=true 时用 CronCreate 建 1 分钟后"
+                        "的一次性'恢复值机'任务自动开新页")
+    return resp
+
+
+def _admin_set(channel):
+    admins_cfg = load_config().get("admin", {}).get(channel) or []
+    if isinstance(admins_cfg, str):
+        admins_cfg = admins_cfg.split(",")
+    if isinstance(admins_cfg, (int, float)):
+        admins_cfg = [admins_cfg]
+    return {str(a).strip() for a in admins_cfg if str(a).strip()}
+
+
+def _guard_hit(channel, contact_id, action):
+    """非管理员尝试修改配置/功能：计数；单账号超过 10 次自动加入黑名单。"""
+    with LOCK:
+        CONN.execute(
+            "INSERT INTO guard(channel, contact_id, count, last_action, last_at) VALUES(?,?,1,?,?)"
+            " ON CONFLICT(channel, contact_id) DO UPDATE SET count=count+1,"
+            " last_action=excluded.last_action, last_at=excluded.last_at",
+            (channel, str(contact_id), action[:60], now_str()))
+        row = CONN.execute("SELECT count FROM guard WHERE channel=? AND contact_id=?",
+                           (channel, str(contact_id))).fetchone()
+        count = int(row["count"])
+        blacklisted = False
+        if count > 10:
+            CONN.execute(
+                "INSERT OR IGNORE INTO rules(list_type, channel, scope, target_id, note, created_at)"
+                " VALUES('blacklist', ?, 'contact', ?, ?, ?)",
+                (channel, str(contact_id), f"非管理员尝试修改配置 {count} 次，自动拉黑", now_str()))
+            blacklisted = True
+        CONN.commit()
+    return count, blacklisted
+
+
+def t_check_admin(channel, contact_id, **_):
+    return {"is_admin": str(contact_id) in _admin_set(channel),
+            "admin_count": len(_admin_set(channel))}
+
+
+def t_report_guard(channel, contact_id, action="", **_):
+    """记录一次非管理员的配置/功能修改尝试；单账号超过 10 次自动拉黑不再回复。"""
+    if not channel or contact_id in (None, ""):
+        raise ValueError("需要 channel 和 contact_id")
+    count, blacklisted = _guard_hit(channel, contact_id, action or "unknown")
+    return {"count": count, "blacklisted": blacklisted,
+            **({"note": "已自动加入黑名单，之后其消息不再回复"} if blacklisted else {})}
 
 
 PERSONA_CMDS = (
     ("/personahelp", "help"), ("/personas", "list"), ("/botstatus", "status"), ("/persona", "switch"),
+    ("/handover", "handover"),
     ("切换人格", "switch"), ("人格列表", "list"), ("机器人状态", "status"), ("人格指令", "help"),
+    ("交接", "handover"),
 )
 
 
@@ -1541,15 +1606,13 @@ def t_bot_command(text, channel="", contact_id="", chat_id="", **_):
             break
     if action is None:
         return {"handled": False}
-    admins_cfg = load_config().get("admin", {}).get(channel) or []
-    if isinstance(admins_cfg, str):
-        admins_cfg = admins_cfg.split(",")
-    if isinstance(admins_cfg, (int, float)):
-        admins_cfg = [admins_cfg]
-    admins = {str(a).strip() for a in admins_cfg if str(a).strip()}
-    if str(contact_id) not in admins:
+    if str(contact_id) not in _admin_set(channel):
+        count, blacklisted = _guard_hit(channel, contact_id, "cmd:" + action)
+        extra = ("（多次尝试修改，已自动加入黑名单）" if blacklisted
+                 else (f"（警告 {count}/10，超过 10 次将自动拉黑）" if count > 3 else ""))
         return {"handled": True, "allowed": False, "action": action,
-                "reply": "这条指令只有管理员能用。"}
+                "reply": "这条指令只有管理员能用。" + extra,
+                "violations": count, "blacklisted": blacklisted}
     with LOCK:
         if action == "switch":
             prev = CONN.execute("SELECT name FROM personas WHERE is_active=1").fetchone()
@@ -1574,6 +1637,11 @@ def t_bot_command(text, channel="", contact_id="", chat_id="", **_):
                      for r in rows]
             return {"handled": True, "allowed": True, "action": "list",
                     "reply": "人格库：\n" + "\n".join(lines) + "\n切换用：切换人格 <名称>"}
+        if action == "handover":
+            return {"handled": True, "allowed": True, "action": "handover", "reply": None,
+                    "data": {"hint": "立即执行会话交接：总结本会话 → session_note(action=save) → 回复确认；"
+                                     "limits.auto_reopen=true 时可用 CronCreate 建 1 分钟后的一次性"
+                                     "'恢复值机'任务自动开新页"}}
     if action == "status":
         st = t_bot_status()
         data = {"active_persona": st.get("active_persona"),
@@ -1606,7 +1674,7 @@ TOOLS = {
     "manage_stickers": (t_manage_stickers, "表情包库：add(本地图片路径,emotion,tags,source_url) / list / delete。emotion 建议用 happy/sad/angry/love/awkward/food 等标签；带 source_url 时自动按 URL 去重。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["add", "list", "delete"]}, "file_path": {"type": "string"}, "emotion": {"type": "string"}, "tags": {"type": "string"}, "source": {"type": "string"}, "source_url": {"type": "string"}, "sticker_id": {"type": "number"}}, "required": ["action"]}),
     "pick_sticker": (t_pick_sticker, "按情绪挑选表情包返回本地路径（自动避免连用同一张），配合 send_qq_message 的 image_path 发送。", {"type": "object", "properties": {"emotion": {"type": "string"}}}),
     "proactive_due": (t_proactive_due, "判断现在是否允许主动发起聊天（enabled、安静时段、每日上限）。主动发言前必须调用。", {"type": "object", "properties": {}}),
-    "bot_command": (t_bot_command, "管理指令入口（管理员在 QQ/微信聊天里热切换人格）。对每条入站消息先调用：handled=true 时发送 reply 并结束该条处理；handled=false 继续正常人格流程。指令：切换人格 <名称>、人格列表、机器人状态、人格指令。管理员配置在 admin.qq / admin.wechat。", {"type": "object", "properties": {"text": {"type": "string"}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}}, "required": ["text"]}),
+    "bot_command": (t_bot_command, "管理指令入口（管理员在 QQ/微信聊天里操作：切换人格/人格列表/机器人状态/交接远程换页）。对每条入站消息先调用：handled=true 时发送 reply 并结束该条处理；非管理员尝试自动计入管理守卫（超10次拉黑）；handled=false 继续正常人格流程。", {"type": "object", "properties": {"text": {"type": "string"}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}}, "required": ["text"]}),
     "poke_qq": (t_poke_qq, "在 QQ 群里戳一戳某人（拟人化互动或回应被戳）。内置黑白名单与限频。", {"type": "object", "properties": {"group_id": {"type": "string"}, "user_id": {"type": "string"}}, "required": ["group_id", "user_id"]}),
     "send_wechat_sticker": (t_send_wechat_sticker, "微信发送本地表情包图片（需先校准 4 组点击坐标，见报错提示与 wechat-adb-setup 技能）。内置拟人延迟与限频。", {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}),
     "extract_video_frames": (t_extract_video_frames, "视频抽帧：对已下载到本地的视频均匀抽取若干帧返回图片路径，再用 Read 逐帧理解内容。需要 ffmpeg（winget install Gyan.FFmpeg）。", {"type": "object", "properties": {"video_path": {"type": "string"}, "frames": {"type": "number", "default": 4}}, "required": ["video_path"]}),
@@ -1622,7 +1690,9 @@ TOOLS = {
     "session_note": (t_session_note, "会话接力笔记：换新对话前 save 一份本会话工作总结，新对话开机 list/get 最近几条即可接上脉络（记忆已外置，换页无损）。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["save", "get", "list", "delete"]}, "note_id": {"type": "number"}, "title": {"type": "string"}, "content": {"type": "string"}, "limit": {"type": "number", "default": 5}}}),
     "search_messages": (t_search_messages, "追溯查找全部收发记录：关键词/渠道/联系人/会话/时间范围，记录永久保留。", {"type": "object", "properties": {"keyword": {"type": "string"}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}, "since": {"type": "string"}, "until": {"type": "string"}, "limit": {"type": "number", "default": 50}}}),
     "export_transcript": (t_export_transcript, "把一段时间的收发记录导出为 Markdown 存档（存 ~/.persona-bot/transcripts/），返回文件路径。", {"type": "object", "properties": {"since": {"type": "string"}, "until": {"type": "string"}, "channel": {"type": "string"}, "chat_id": {"type": "string"}}}),
-    "session_progress": (t_session_progress, "会话进度标记：每轮用户交互/心跳后调用；达到 limits.auto_handover_turns 阈值返回 auto_handover=true 触发自动交接（总结存档+提示换页）。新会话由 SessionStart hook 自动归零。", {"type": "object", "properties": {"note": {"type": "string"}}}),
+    "session_progress": (t_session_progress, "会话进度标记：每轮用户交互/心跳后调用；按轮数折算上下文占用估算百分比，≥warn_pct(85%) 提醒、≥handover_pct(95%) 返回 auto_handover=true 触发自动交接。新会话由 SessionStart hook 自动归零。", {"type": "object", "properties": {"note": {"type": "string"}}}),
+    "check_admin": (t_check_admin, "管理员判定：该渠道联系人是否在 admin.qq/admin.wechat 名单。所有配置/功能修改请求前必须调用。", {"type": "object", "properties": {"channel": {"type": "string"}, "contact_id": {"type": "string"}}, "required": ["channel", "contact_id"]}),
+    "report_guard": (t_report_guard, "管理守卫：记录一次非管理员的配置/功能修改尝试（拒绝执行后调用）；单账号超过 10 次自动加入黑名单，之后其消息不再回复。bot_command 的指令类尝试已自动计数。", {"type": "object", "properties": {"channel": {"type": "string"}, "contact_id": {"type": "string"}, "action": {"type": "string"}}, "required": ["channel", "contact_id"]}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}

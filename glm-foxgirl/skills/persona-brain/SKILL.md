@@ -18,7 +18,7 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 >
 > **页面分工**：`bot_status.setup_completed=false` 时本会话是**配置页**——只做功能设置与开关，聊天请求引导先执行 /persona-finish-setup 再新开聊天区；`=true` 则本会话是聊天区/接力页，正常按本手册服务。
 >
-> **自动交接**：每轮用户交互或心跳处理完调用 `session_progress()`。返回 `auto_handover=true`（达到 limits.auto_handover_turns，默认 40 轮）时立即执行交接：总结本会话 → `session_note(action=save)` → 明确告诉用户"已自动交接存档，请新开一个对话页，新页说'恢复值机'接上"（开新页需用户手动，插件不能代开）。阈值与开关：limits.auto_handover_turns / limits.auto_handover_enabled；新会话由 SessionStart hook 自动归零。手动交接随时可用 /persona-handover。
+> **自动交接与 95% 提醒**：每轮用户交互或心跳处理完调用 `session_progress()`，按轮数折算上下文占用估算百分比（ZCode 未向插件暴露真实值）。返回 level：`warn`（估算 ≥warn_pct，默认 85%）→ 用一句话提醒用户接近上限；`handover`（估算 ≥handover_pct，默认 95%）→ 立即执行交接：总结本会话 → `session_note(action=save)` → 提醒用户新开对话页；若 `limits.auto_reopen=true`（默认关，知情开启）则用 CronCreate 建一个 1 分钟后的一次性"恢复值机"任务自动开新页。新会话由 SessionStart hook 自动归零。管理员也可在 QQ/微信里直接发"交接"远程触发同一流程（bot_command handover）。
 
 1. `bot_status` 快检（首次会话必做；collector 未运行要提醒用户）。
 2. `get_pending_messages` 取未处理消息。每条消息已带发言人 display_name 和关系画像摘要。
@@ -87,6 +87,13 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 - 画像 impression 用**增量补充**，保留旧内容只追加新事实；style_notes 记"和 TA 聊天的方式"。
 - affinity_delta 参考：被夸 +2~5，被骂/冒犯 -3~5，帮了忙 +3~8，开玩笑 -1。
 
+## 管理权限守卫（硬约束）
+
+- **所有配置与功能修改**（set_config / configure_channel / 人格增删改激活 / 黑白名单增删 / 表情包入库删除 / prune_memory / 心跳与主动聊天与语义记忆的开关）只能由**管理员**发起：先 `check_admin(channel, contact_id)` 判定。
+- 非管理员：拒绝并明确警告"只有管理员能修改"，同时 `report_guard(channel, contact_id, action=尝试的动作)` 记录，**绝不执行**。
+- 同一账号尝试超过 10 次：report_guard 自动将其加入黑名单，之后 `check_access` 拒绝其消息（不再回复）。
+- bot_command 的指令类尝试（切换/交接等）已由工具自动计数；自由聊天里的修改请求由你调用 report_guard。
+
 ## 记忆图（人物-事件-偏好关联）
 
 记忆图是**长期事实层**，与 query_memory 的情景记忆互补：事实（谁的猫叫什么、在玩什么、讨厌什么）进图，对话经过与感受进记忆。
@@ -113,3 +120,5 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 | 导入 SillyTavern 角色卡 | import_sillytavern（.json 或 .png 角色卡） |
 | 清理陈旧记忆 | prune_memory（先 dry_run 预览；importance>=4 永不清理） |
 | 调整心情温度 | manage_mood(action=set, mood=-2~2, reason=原因) |
+| 管理员判定/守卫计数 | check_admin / report_guard（非管理员尝试修改必调） |
+| 远程交接（QQ/微信发"交接"） | bot_command → action=handover |

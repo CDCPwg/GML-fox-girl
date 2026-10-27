@@ -143,7 +143,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 37 个工具", len(tools) == 37, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 39 个工具", len(tools) == 39, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -477,8 +477,44 @@ def main():
     check("hook 首次输出速览v3并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
           and "自动交接" in r1.stdout.decode("utf-8", "replace")
           and (cfgj.get("session") or {}).get("turns") == 0
-          and cfgj.get("intro", {}).get("version") == 3, cfgj.get("session"))
+          and cfgj.get("intro", {}).get("version") == 4, cfgj.get("session"))
     check("hook 二次静默", r2.stdout.decode("utf-8", "replace").strip() == "", r2.stdout)
+
+    print("[v0.12] 管理守卫 / 95%提醒 / 远程交接")
+    data, _ = c.tool("check_admin", {"channel": "qq", "contact_id": "10001"})
+    a1 = data.get("is_admin")
+    data, _ = c.tool("check_admin", {"channel": "qq", "contact_id": "88888"})
+    check("管理员判定", a1 is True and data.get("is_admin") is False, (a1, data))
+    data, _ = c.tool("bot_command", {"text": "交接", "channel": "qq", "contact_id": "10001"})
+    check("QQ指令远程交接(管理员)", data.get("action") == "handover"
+          and data.get("allowed") is True, data)
+    data, _ = c.tool("bot_command", {"text": "交接", "channel": "qq", "contact_id": "88888"})
+    check("非管理员交接被拒并计警", data.get("allowed") is False
+          and data.get("violations") == 1, data)
+    for _ in range(10):
+        data, _ = c.tool("report_guard", {"channel": "qq", "contact_id": "77777",
+                                          "action": "set_config"})
+    check("连续尝试计数到10不拉黑", data.get("count") == 10
+          and data.get("blacklisted") is False, data)
+    data, _ = c.tool("report_guard", {"channel": "qq", "contact_id": "77777",
+                                      "action": "set_config"})
+    check("超过10次自动拉黑", data.get("count") == 11
+          and data.get("blacklisted") is True, data)
+    data, _ = c.tool("check_access", {"channel": "qq", "chat_type": "private",
+                                      "chat_id": "77777", "contact_id": "77777"})
+    check("拉黑后不再回复其消息", data.get("allowed") is False, data)
+    c.tool("set_config", {"key": "session.turns", "value": 0})
+    c.tool("set_config", {"key": "limits.auto_handover_turns", "value": 20})
+    for _ in range(17):
+        data, _ = c.tool("session_progress", {})
+    check("85%轻提醒级别", data.get("level") == "warn"
+          and data.get("estimated_pct") == 85, data)
+    data, _ = c.tool("session_progress", {})
+    data, _ = c.tool("session_progress", {})
+    check("95%触发交接级别", data.get("level") == "handover"
+          and data.get("estimated_pct") == 95 and data.get("auto_handover") is True, data)
+    data, _ = c.tool("bot_status")
+    check("状态含守卫计数", data["counts"].get("guard") == 3, data["counts"])
 
     c.close()
     time.sleep(1.0)
