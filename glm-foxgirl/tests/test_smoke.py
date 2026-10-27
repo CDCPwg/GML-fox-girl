@@ -143,7 +143,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 27 个工具", len(tools) == 27, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 29 个工具", len(tools) == 29, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -341,6 +341,42 @@ def main():
     data, _ = c.tool("flush_outbox")
     check("恢复后补发成功", data.get("sent") == 1 and data.get("remaining") == 0, data)
     nap.shutdown()
+
+    print("[v0.7] 心情 / 统计 / WebUI")
+    data, _ = c.tool("manage_mood", {"action": "set", "mood": 9, "reason": "被夸爆了"})
+    check("心情设置并夹到范围", data.get("mood") == 2, data)
+    data, _ = c.tool("manage_mood", {"action": "get"})
+    check("心情读取", data.get("mood") == 2 and "被夸爆了" in data.get("reason", ""), data)
+    data, _ = c.tool("get_stats")
+    check("统计报表可用", data.get("week", {}).get("in", 0) >= 2
+          and isinstance(data.get("top_profiles"), list), data)
+
+    env2 = dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8")
+    web = subprocess.Popen([sys.executable, SERVER, "--webui", "--port", "3988"], env=env2,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    up = False
+    for _ in range(30):
+        try:
+            with socket.create_connection(("127.0.0.1", 3988), timeout=0.3):
+                up = True
+                break
+        except OSError:
+            time.sleep(0.3)
+    try:
+        page = urllib.request.urlopen("http://127.0.0.1:3988/", timeout=5).read().decode("utf-8")
+        st = json.loads(urllib.request.urlopen("http://127.0.0.1:3988/api/state", timeout=5).read().decode("utf-8"))
+        req = urllib.request.Request("http://127.0.0.1:3988/api/mood",
+                                     data=json.dumps({"mood": 1}).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        mr = json.loads(urllib.request.urlopen(req, timeout=5).read().decode("utf-8"))
+        check("WebUI 页面与 API", up and "GLM狐狸娘" in page
+              and "personas" in st and mr.get("ok") is True, (up, bool(st), mr))
+    finally:
+        web.terminate()
+        try:
+            web.wait(timeout=5)
+        except Exception:
+            web.kill()
 
     c.close()
     time.sleep(1.0)

@@ -26,7 +26,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -646,6 +646,7 @@ def t_send_wechat_message(text, **_):
     if not ok:
         return {"sent": False, "blocked": True, "reason": why}
     human_delay()
+    _human_trace(serial)
     ime = run_adb(["-s", serial, "shell", "ime", "list", "-s"]).stdout.decode("utf-8", "replace")
     if "com.android.adbkeyboard" in ime:
         b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
@@ -962,6 +963,61 @@ def t_proactive_due(**_):
             "group_reply_probability": cfg.get("reply_probability_group", 0.3)}
 
 
+def t_manage_mood(action="get", mood=0, reason="", **_):
+    """心情状态层：叠加在人格之上的临时情绪温度（-2 很down ~ +2 很嗨）。"""
+    cfg = load_config()
+    if action == "get":
+        return {"mood": int(cfg.get("mood", {}).get("current", 0)),
+                "reason": cfg.get("mood", {}).get("reason", ""),
+                "scale": "-2 低落 ~ 0 平静 ~ +2 高涨；影响说话温度与主动意愿，由大脑随互动更新"}
+    if action == "set":
+        m = max(-2, min(2, int(mood)))
+        cfg["mood"] = {"current": m, "reason": reason or "", "updated_at": now_str()}
+        save_config(cfg)
+        return {"ok": True, "mood": m, "reason": reason or ""}
+    raise ValueError(f"未知 action: {action}")
+
+
+def t_get_stats(**_):
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.now().strftime("%Y-%m-%d")
+    with LOCK:
+        def one(sql, args=()):
+            return CONN.execute(sql, args).fetchone()[0]
+        in7 = one("SELECT COUNT(*) FROM messages WHERE direction='in' AND created_at>=?", (week_ago,))
+        out7 = one("SELECT COUNT(*) FROM messages WHERE direction='out' AND created_at>=?", (week_ago,))
+        stats = {
+            "week": {"in": in7, "out": out7,
+                     "proactive": one("SELECT COUNT(*) FROM messages WHERE direction='out' AND out_kind='proactive' AND created_at>=?", (week_ago,)),
+                     "reply_rate": round(out7 / in7, 3) if in7 else 0.0},
+            "today_in": one("SELECT COUNT(*) FROM messages WHERE direction='in' AND created_at>=?", (today,)),
+            "outbox_pending": one("SELECT COUNT(*) FROM outbox"),
+            "memories": one("SELECT COUNT(*) FROM memories"),
+            "stickers": one("SELECT COUNT(*) FROM stickers"),
+            "mood": int(load_config().get("mood", {}).get("current", 0)),
+            "top_profiles": [dict(r) for r in CONN.execute(
+                "SELECT channel, contact_id, display_name, affinity FROM profiles ORDER BY affinity DESC LIMIT 5")],
+            "top_stickers": [dict(r) for r in CONN.execute(
+                "SELECT emotion, tags, use_count FROM stickers ORDER BY use_count DESC LIMIT 5")],
+        }
+    return stats
+
+
+def _human_trace(serial):
+    """ADB 轨迹随机化：偶尔来一下无意义小滑动，降低自动化特征。失败静默忽略。"""
+    if not load_config()["wechat"].get("human_trace", True):
+        return
+    try:
+        if random.random() < 0.35:
+            run_adb(["-s", serial, "shell", "input", "swipe",
+                     str(random.randint(80, 160)), str(random.randint(700, 1100)),
+                     str(random.randint(80, 160)), str(random.randint(650, 1050)),
+                     str(random.randint(150, 350))])
+            time.sleep(random.uniform(0.3, 0.8))
+    except Exception:
+        pass
+
+
 def t_poke_qq(group_id, user_id, **_):
     decision = access_decision("qq", "group", str(group_id), None)
     if not decision["allowed"]:
@@ -1000,6 +1056,7 @@ def t_send_wechat_sticker(file_path, **_):
     if not ok:
         return {"sent": False, "blocked": True, "reason": why}
     human_delay()
+    _human_trace(serial)
     remote = f"/sdcard/Pictures/glmfox_{int(time.time() * 1000)}.png"
     run_adb(["-s", serial, "push", os.path.abspath(file_path), remote], timeout=60)
     run_adb(["-s", serial, "shell", "am", "broadcast", "-a",
@@ -1287,9 +1344,140 @@ TOOLS = {
     "prune_memory": (t_prune_memory, "遗忘曲线清理：删除遗忘得分低于 keep_score 且重要级<=3 的旧记忆（重要级>=4 永不清理）。先 dry_run=true 预览。", {"type": "object", "properties": {"keep_score": {"type": "number", "default": 1.0}, "dry_run": {"type": "boolean", "default": True}, "limit": {"type": "number", "default": 500}}}),
     "import_sillytavern": (t_import_sillytavern, "导入 SillyTavern 角色卡为人格：.json 或带 tEXt chara 数据的 .png。重名自动加后缀。", {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}),
     "flush_outbox": (t_flush_outbox, "补发队列：NapCat 掉线期间排队的消息在恢复后重发，超过 max_age_min 分钟的过期丢弃。每轮心跳结束时应调用一次。", {"type": "object", "properties": {"max_age_min": {"type": "number", "default": 30}}}),
+    "manage_mood": (t_manage_mood, "心情状态层：get/set 当前情绪温度（-2~2，set 需 reason）。影响说话温度与主动意愿，随互动由大脑更新。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["get", "set"]}, "mood": {"type": "number"}, "reason": {"type": "string"}}}),
+    "get_stats": (t_get_stats, "统计报表：7天收发/回复率/主动次数、今日入站、队列、记忆表情包数量、好感TOP、表情包使用TOP。", {"type": "object", "properties": {}}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}
+
+
+# ---------------------------------------------------------------- WebUI
+
+WEBUI_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>GLM狐狸娘 控制台</title>
+<style>
+body{font-family:system-ui,"Microsoft YaHei";margin:0;background:#111;color:#eee}
+h1{font-size:18px;padding:12px 16px;margin:0;background:#1b1b1b;border-bottom:1px solid #333}
+nav{display:flex;gap:4px;padding:8px 16px;background:#161616;flex-wrap:wrap}
+nav button{background:#222;color:#ccc;border:1px solid #333;border-radius:6px;padding:6px 12px;cursor:pointer}
+nav button.on{background:#3b5bdb;color:#fff}
+main{padding:16px;max-width:1100px;margin:0 auto}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+th,td{border-bottom:1px solid #2a2a2a;padding:6px 8px;text-align:left;vertical-align:top}
+button.act{background:#2f9e44;color:#fff;border:0;border-radius:4px;padding:3px 8px;cursor:pointer}
+button.del{background:#c92a2a;color:#fff;border:0;border-radius:4px;padding:3px 8px;cursor:pointer}
+textarea{width:100%;min-height:90px;background:#191919;color:#eee;border:1px solid #333;border-radius:6px;font-family:inherit}
+input,select{background:#191919;color:#eee;border:1px solid #333;border-radius:4px;padding:4px}
+.kpi{display:flex;gap:12px;flex-wrap:wrap}
+.kpi div{background:#1b1b1b;border:1px solid #333;border-radius:8px;padding:10px 14px;min-width:110px}
+.kpi b{display:block;font-size:20px;color:#7aa2ff}
+small{color:#888}
+</style></head><body>
+<h1>🦊 GLM狐狸娘 控制台 <span id="ver" style="font-size:12px;color:#888"></span></h1>
+<nav id="tabs"></nav><main id="view"></main>
+<script>
+let S=null,tab='状态';
+const tabs=['状态','人格','记忆','画像','黑白名单','表情包','统计'];
+function esc(s){return (s==null?'':''+s).replace(/</g,'&lt;')}
+async function act(path,body){await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});load()}
+async function load(){S=await (await fetch('/api/state')).json();document.getElementById('ver').textContent='v'+S.status.version;render()}
+function nav(){document.getElementById('tabs').innerHTML=tabs.map(t=>`<button class="${t===tab?'on':''}" onclick="tab='${t}';nav();render()">${t}</button>`).join('')}
+function render(){const v=document.getElementById('view');
+ if(tab==='状态'){const c=S.status.counts;v.innerHTML=`<div class="kpi">
+  <div>激活人格<b>${esc(S.status.active_persona||'无')}</b></div><div>待处理消息<b>${c.pending_messages}</b></div>
+  <div>待补发<b>${c.outbox}</b></div><div>记忆<b>${c.memories}</b></div><div>表情包<b>${c.stickers}</b></div>
+  <div>规则<b>${c.rules}</b></div><div>collector<b>${S.status.collector.running?'运行中':'未运行'}</b></div></div>
+  <p><small>心情：${S.stats.mood} ｜ 数据目录：${esc(S.status.data_dir)}（备份它即备份一切）</small></p>`}
+ if(tab==='人格'){v.innerHTML='<table><tr><th>名称</th><th>状态</th><th>prompt（可编辑）</th><th>风格</th><th></th></tr>'+
+  S.personas.personas.map(p=>'<tr><td>'+esc(p.name)+'</td><td>'+(p.is_active?'▶激活':'')+'</td>'+
+  '<td><textarea onchange="act(\'/api/persona/update\',{persona_id:'+p.id+',prompt:this.value,style:document.getElementById(\\'st'+p.id+'\\').value})">'+esc(p.prompt)+'</textarea></td>'+
+  '<td><input id="st'+p.id+'" value="'+esc(p.style)+'"></td>'+
+  '<td><button class="act" onclick="act(\'/api/persona/activate\',{persona_id:'+p.id+'})">激活</button></td></tr>').join('')+'</table>'}
+ if(tab==='记忆'){v.innerHTML='<table><tr><th>score</th><th>内容</th><th>对象</th><th>重要/情绪</th></tr>'+
+  S.memories.memories.map(m=>'<tr><td>'+(m.score??'')+'</td><td>'+esc(m.content)+'</td><td>'+esc(m.contact_id)+'</td><td>'+m.importance+'/'+(m.emotion??0)+'</td></tr>').join('')+'</table>'}
+ if(tab==='画像'){v.innerHTML='<table><tr><th>对象</th><th>好感</th><th>印象</th><th>风格</th></tr>'+
+  S.profiles.profiles.map(p=>'<tr><td>'+esc(p.display_name||p.contact_id)+' <small>'+esc(p.channel)+'</small></td><td>'+p.affinity+'</td><td>'+esc(p.impression)+'</td><td>'+esc(p.style_notes)+'</td></tr>').join('')+'</table>'}
+ if(tab==='黑白名单'){v.innerHTML='<div>新增：<select id="lt"><option>blacklist</option><option>whitelist</option></select> '+
+  '<select id="sc"><option>contact</option><option>group</option><option>global</option></select> '+
+  '<select id="ch"><option>*</option><option>qq</option><option>wechat</option></select> '+
+  '<input id="tid" placeholder="ID" size="12"> <button class="act" onclick="act(\'/api/rules/add\',{list_type:lt.value,scope:sc.value,channel:ch.value,target_id:tid.value})">添加</button></div>'+
+  '<table><tr><th>类型</th><th>渠道</th><th>粒度</th><th>ID</th><th></th></tr>'+
+  S.rules.rules.map(r=>'<tr><td>'+esc(r.list_type)+'</td><td>'+esc(r.channel)+'</td><td>'+esc(r.scope)+'</td><td>'+esc(r.target_id)+'</td>'+
+  '<td><button class="del" onclick="act(\'/api/rules/remove\',{list_type:\''+r.list_type+'\',scope:\''+r.scope+'\',channel:\''+r.channel+'\',target_id:\''+esc(r.target_id)+'\'})">删除</button></td></tr>').join('')+'</table>'}
+ if(tab==='表情包'){v.innerHTML='<table><tr><th>情绪</th><th>标签</th><th>路径</th><th>使用</th></tr>'+
+  S.stickers.stickers.map(s=>'<tr><td>'+esc(s.emotion)+'</td><td>'+esc(s.tags)+'</td><td>'+esc(s.file_path)+'</td><td>'+s.use_count+'</td></tr>').join('')+'</table>'}
+ if(tab==='统计'){const w=S.stats.week;v.innerHTML='<div class="kpi">'+
+  '<div>7天收<b>'+w['in']+'</b></div><div>7天发<b>'+w['out']+'</b></div><div>回复率<b>'+w['reply_rate']+'</b></div>'+
+  '<div>主动<b>'+w['proactive']+'</b></div><div>心情<b>'+S.stats.mood+'</b></div></div>'+
+  '<h3>好感 TOP</h3><table><tr><th>对象</th><th>好感</th></tr>'+
+  S.stats.top_profiles.map(p=>'<tr><td>'+esc(p.display_name||p.contact_id)+'</td><td>'+p.affinity+'</td></tr>').join('')+'</table>'}
+}
+nav();load();setInterval(load,10000);
+</script></body></html>
+"""
+
+
+class WebUIHandler(BaseHTTPRequestHandler):
+    def _json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/":
+            body = WEBUI_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/api/state":
+            self._json({"personas": t_manage_persona(action="list"),
+                        "profiles": t_manage_profile(action="list"),
+                        "rules": t_manage_rules(action="list"),
+                        "stickers": t_manage_stickers(action="list"),
+                        "memories": t_query_memory(limit=50),
+                        "stats": t_get_stats(),
+                        "status": t_bot_status()})
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if self.path == "/api/persona/activate":
+                self._json(t_manage_persona(action="set_active", persona_id=body.get("persona_id")))
+            elif self.path == "/api/persona/update":
+                self._json(t_manage_persona(action="update", persona_id=body.get("persona_id"),
+                                            prompt=body.get("prompt"), style=body.get("style")))
+            elif self.path == "/api/rules/add":
+                self._json(t_manage_rules(action="add", list_type=body.get("list_type"),
+                                          scope=body.get("scope", "contact"),
+                                          channel=body.get("channel", "*"),
+                                          target_id=body.get("target_id"), note=body.get("note", "")))
+            elif self.path == "/api/rules/remove":
+                self._json(t_manage_rules(action="remove", list_type=body.get("list_type"),
+                                          scope=body.get("scope"), channel=body.get("channel"),
+                                          target_id=body.get("target_id")))
+            elif self.path == "/api/mood":
+                self._json(t_manage_mood(action="set", mood=body.get("mood", 0),
+                                         reason=body.get("reason", "")))
+            else:
+                self._json({"error": "not found"}, 404)
+        except Exception as e:
+            self._json({"error": str(e)}, 400)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+def main_webui(port):
+    srv = ThreadingHTTPServer(("127.0.0.1", int(port)), WebUIHandler)
+    print(f"[glm-foxgirl] WebUI: http://127.0.0.1:{port}/ （仅本机可访问，Ctrl+C 退出）", file=sys.stderr)
+    srv.serve_forever()
 
 
 # ---------------------------------------------------------------- MCP stdio loop
@@ -1348,7 +1536,12 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     init_db()
-    if "--collector" in sys.argv:
+    if "--webui" in sys.argv:
+        port = 8765
+        if "--port" in sys.argv:
+            port = int(sys.argv[sys.argv.index("--port") + 1])
+        main_webui(port)
+    elif "--collector" in sys.argv:
         cfg = load_config()["collector"]
         srv = ThreadingHTTPServer((cfg.get("host", "127.0.0.1"), int(cfg.get("port", 3001))), EventHandler)
         print(f"[glm-foxgirl] collector daemon on http://{cfg['host']}:{cfg['port']}/onebot/event (Ctrl+C 退出)", file=sys.stderr)
