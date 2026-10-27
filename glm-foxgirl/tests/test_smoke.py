@@ -143,7 +143,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 29 个工具", len(tools) == 29, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 31 个工具", len(tools) == 31, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -377,6 +377,30 @@ def main():
             web.wait(timeout=5)
         except Exception:
             web.kill()
+
+    print("[v0.8] 记忆图")
+    c.tool("graph_add", {"subject": "阿明", "relation": "在玩", "target": "王者荣耀",
+                         "subject_kind": "person", "target_kind": "topic"})
+    c.tool("graph_add", {"subject": "阿明", "relation": "养了", "target": "煤球",
+                         "subject_kind": "person", "target_kind": "pet",
+                         "note": "一只特别胖的猫"})
+    c.tool("graph_add", {"subject": "煤球", "relation": "讨厌", "target": "洗澡",
+                         "subject_kind": "pet", "target_kind": "thing"})
+    data, _ = c.tool("graph_query", {"entity": "阿明"})
+    check("记忆图一跳关联", data.get("found") and len(data.get("edges", [])) == 2
+          and any(e["dst_name"] == "煤球" for e in data["edges"]), data)
+    data, _ = c.tool("graph_query", {"entity": "煤球", "depth": 2})
+    names = {n["name"] for n in data.get("nodes", [])}
+    check("记忆图二跳扩散到王者荣耀", data.get("found") and "王者荣耀" in names, data)
+    c.tool("graph_add", {"subject": "阿明", "relation": "在玩", "target": "王者荣耀"})
+    data, _ = c.tool("graph_query", {"entity": "阿明"})
+    e = next(x for x in data["edges"] if x["dst_name"] == "王者荣耀")
+    check("重复三元组加权不重复", e["weight"] == 2, e)
+    data, _ = c.tool("graph_query", {})
+    check("记忆图总览", data.get("overview") and len(data.get("nodes", [])) >= 3, data)
+    data, _ = c.tool("bot_status")
+    check("状态含记忆图计数", data["counts"].get("graph_nodes") == 4
+          and data["counts"].get("graph_edges") == 3, data["counts"])
 
     c.close()
     time.sleep(1.0)

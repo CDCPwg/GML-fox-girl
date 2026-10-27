@@ -23,10 +23,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -85,6 +86,13 @@ CREATE TABLE IF NOT EXISTS outbox(
   id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT DEFAULT 'qq', chat_type TEXT DEFAULT 'private',
   chat_id TEXT DEFAULT '', contact_id TEXT DEFAULT '', text TEXT DEFAULT '', image_path TEXT DEFAULT '',
   out_kind TEXT DEFAULT 'reply', tries INTEGER DEFAULT 0, last_error TEXT DEFAULT '', created_at TEXT);
+CREATE TABLE IF NOT EXISTS graph_nodes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT COLLATE NOCASE NOT NULL UNIQUE,
+  kind TEXT DEFAULT 'other', summary TEXT DEFAULT '', created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS graph_edges(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, src_id INTEGER NOT NULL, dst_id INTEGER NOT NULL,
+  relation TEXT NOT NULL, weight INTEGER DEFAULT 1, note TEXT DEFAULT '', last_seen TEXT,
+  UNIQUE(src_id, dst_id, relation));
 """
 
 
@@ -474,7 +482,9 @@ def t_bot_status(**_):
                        "profiles": one("SELECT COUNT(*) FROM profiles"),
                        "rules": one("SELECT COUNT(*) FROM rules"),
                        "stickers": one("SELECT COUNT(*) FROM stickers"),
-                       "outbox": one("SELECT COUNT(*) FROM outbox")},
+                       "outbox": one("SELECT COUNT(*) FROM outbox"),
+                       "graph_nodes": one("SELECT COUNT(*) FROM graph_nodes"),
+                       "graph_edges": one("SELECT COUNT(*) FROM graph_edges")},
             "intro_shown": bool(load_config().get("intro", {}).get("shown")),
             "qq": {"enabled": cfg["qq"]["enabled"], "napcat_base_url": cfg["qq"]["napcat_base_url"],
                    "token_set": bool(cfg["qq"]["napcat_token"])},
@@ -1254,6 +1264,70 @@ def t_import_sillytavern(file_path, **_):
                 "hint": "manage_persona set_active 启用；建议人工过一遍 prompt 补充说话风格与雷点"}
 
 
+def _graph_node(name, kind):
+    row = CONN.execute("SELECT id FROM graph_nodes WHERE name=? COLLATE NOCASE", (name,)).fetchone()
+    if row:
+        CONN.execute("UPDATE graph_nodes SET updated_at=? WHERE id=?", (now_str(), row["id"]))
+        return row["id"]
+    return CONN.execute("INSERT INTO graph_nodes(name, kind, created_at, updated_at) VALUES(?,?,?,?)",
+                        (name, kind or "other", now_str(), now_str())).lastrowid
+
+
+def t_graph_add(subject, relation, target, subject_kind="other", target_kind="other", note="", **_):
+    """向记忆图添加/加权一条三元组：谁 -关系-> 什么（同一三元组重复添加只加权重）。"""
+    if not subject or not relation or not target:
+        raise ValueError("subject/relation/target 都不能为空")
+    with LOCK:
+        sid = _graph_node(subject.strip(), subject_kind)
+        tid = _graph_node(target.strip(), target_kind)
+        CONN.execute(
+            "INSERT INTO graph_edges(src_id, dst_id, relation, weight, note, last_seen)"
+            " VALUES(?,?,?,?,?,?)"
+            " ON CONFLICT(src_id, dst_id, relation) DO UPDATE SET weight=weight+1,"
+            " last_seen=excluded.last_seen,"
+            " note=CASE WHEN excluded.note!='' THEN excluded.note ELSE graph_edges.note END",
+            (sid, tid, relation.strip(), 1, note or "", now_str()))
+        CONN.commit()
+        return {"ok": True}
+
+
+def t_graph_query(entity="", depth=1, limit=60, **_):
+    """记忆图查询：entity 留空返回总览（按关联度排序）；否则从该实体 BFS 扩散 depth 层。"""
+    with LOCK:
+        if not str(entity).strip():
+            rows = CONN.execute(
+                "SELECT n.id, n.name, n.kind, n.summary,"
+                " COALESCE((SELECT SUM(weight) FROM graph_edges e WHERE e.src_id=n.id OR e.dst_id=n.id),0) AS degree"
+                " FROM graph_nodes n ORDER BY degree DESC, n.id DESC LIMIT ?",
+                (max(1, min(int(limit), 100)),)).fetchall()
+            return {"overview": True, "nodes": [dict(r) for r in rows]}
+        root = CONN.execute("SELECT id, name, kind FROM graph_nodes WHERE name=? COLLATE NOCASE",
+                            (str(entity).strip(),)).fetchone()
+        if not root:
+            return {"found": False, "hint": "图里还没有这个实体；可先 graph_add 添加"}
+        seen = {root["id"]: {"name": root["name"], "kind": root["kind"]}}
+        frontier = [root["id"]]
+        edges_out = []
+        for _ in range(max(1, min(int(depth), 3))):
+            nxt = []
+            for nid in frontier:
+                for e in CONN.execute(
+                        "SELECT e.*, sn.name AS src_name, dn.name AS dst_name FROM graph_edges e"
+                        " JOIN graph_nodes sn ON sn.id=e.src_id JOIN graph_nodes dn ON dn.id=e.dst_id"
+                        " WHERE e.src_id=? OR e.dst_id=?", (nid, nid)).fetchall():
+                    edges_out.append(dict(e))
+                    other = e["dst_id"] if e["src_id"] == nid else e["src_id"]
+                    if other not in seen:
+                        row = CONN.execute("SELECT id, name, kind FROM graph_nodes WHERE id=?",
+                                           (other,)).fetchone()
+                        seen[other] = {"name": row["name"], "kind": row["kind"]}
+                        nxt.append(other)
+            frontier = nxt
+        uniq = {(e["src_id"], e["dst_id"], e["relation"]): e for e in edges_out}
+        return {"found": True, "root": root["name"], "nodes": list(seen.values()),
+                "edges": list(uniq.values())[:max(1, min(int(limit), 100))]}
+
+
 PERSONA_CMDS = (
     ("/personahelp", "help"), ("/personas", "list"), ("/botstatus", "status"), ("/persona", "switch"),
     ("切换人格", "switch"), ("人格列表", "list"), ("机器人状态", "status"), ("人格指令", "help"),
@@ -1346,6 +1420,8 @@ TOOLS = {
     "flush_outbox": (t_flush_outbox, "补发队列：NapCat 掉线期间排队的消息在恢复后重发，超过 max_age_min 分钟的过期丢弃。每轮心跳结束时应调用一次。", {"type": "object", "properties": {"max_age_min": {"type": "number", "default": 30}}}),
     "manage_mood": (t_manage_mood, "心情状态层：get/set 当前情绪温度（-2~2，set 需 reason）。影响说话温度与主动意愿，随互动由大脑更新。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["get", "set"]}, "mood": {"type": "number"}, "reason": {"type": "string"}}}),
     "get_stats": (t_get_stats, "统计报表：7天收发/回复率/主动次数、今日入站、队列、记忆表情包数量、好感TOP、表情包使用TOP。", {"type": "object", "properties": {}}),
+    "graph_add": (t_graph_add, "记忆图写入三元组：谁(subject) -关系-> 什么(target)。关系常用：喜欢/讨厌/养了/参与/提到/约定/擅长/在玩。重复添加同一三元组只加权重。", {"type": "object", "properties": {"subject": {"type": "string"}, "relation": {"type": "string"}, "target": {"type": "string"}, "subject_kind": {"type": "string"}, "target_kind": {"type": "string"}, "note": {"type": "string"}}, "required": ["subject", "relation", "target"]}),
+    "graph_query": (t_graph_query, "记忆图查询：entity=实体名 从该实体 BFS 扩散 depth 层（1-3），返回关联的人/事/偏好；entity 留空返回按关联度排序的总览。回复前对消息里出现的具体对象调用它可带出联想。", {"type": "object", "properties": {"entity": {"type": "string"}, "depth": {"type": "number", "default": 1}, "limit": {"type": "number", "default": 60}}}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}

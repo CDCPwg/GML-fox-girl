@@ -31,7 +31,7 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
    - poke 戳一戳：用人格的方式反应（GLM娘：炸毛/回戳），可 `poke_qq(group_id, user_id)` 回戳；拿不准就文字吐槽，别过度。
    - 微信：先 `wechat_screenshot` + Read 确认当前聊天，再操作；发表情包用 `send_wechat_sticker`（需先按 setup 技能校准坐标）。
 9. 以**人格口吻**生成回复并 `send_qq_message`（QQ）或 `send_wechat_message`（微信）。工具内部已做黑白名单二次校验、随机延迟、限频——**不要**为了"快点"绕过或连续调用轰炸。想配图就 `pick_sticker` 后传 `image_path`。
-10. 沉淀：`store_memory`（有价值的才记）+ `manage_profile(action=upsert, impression=新增量, affinity_delta=±)` + `mark_processed`。
+10. 沉淀：`store_memory`（经过与感受，有价值的才记）+ `graph_add`（长期事实抽三元组：谁 -关系-> 什么，见"记忆图"节）+ `manage_profile(action=upsert, impression=新增量, affinity_delta=±)` + `mark_processed`。
 
 ## 群聊回复必要性判断
 
@@ -82,6 +82,15 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 - **不记**：密码、支付、证件等敏感信息；提示对方注意即可，绝不写入。
 - 画像 impression 用**增量补充**，保留旧内容只追加新事实；style_notes 记"和 TA 聊天的方式"。
 - affinity_delta 参考：被夸 +2~5，被骂/冒犯 -3~5，帮了忙 +3~8，开玩笑 -1。
+
+## 记忆图（人物-事件-偏好关联）
+
+记忆图是**长期事实层**，与 query_memory 的情景记忆互补：事实（谁的猫叫什么、在玩什么、讨厌什么）进图，对话经过与感受进记忆。
+
+- 沉淀时从值得记的对话抽三元组：`graph_add(subject, relation, target)`，关系常用：喜欢/讨厌/养了/参与/提到/约定/擅长/在玩；同一事实重复出现自动加权。
+- 回复前：消息里出现具体对象（人名/宠物/游戏/番剧）就 `graph_query(entity=名字, depth=2)`，把关联事实揉进口吻——"你那只想洗澡就炸毛的煤球…"比泛泛附和真实十倍。
+- `graph_query(entity="")` 返回按关联度排序的总览：主动聊天找话题、冷场救场时用。
+- 拿不准就少记图：图是事实，不是聊天记录。
 
 ## 主动聊天流程
 
