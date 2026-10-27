@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -47,6 +47,7 @@ DEFAULT_CONFIG = {
     "memory": {"embed_base_url": "", "embed_api_key": "", "embed_model": "embedding-3",
                "half_life_days": 30},
     "mood": {"current": 0, "reason": ""},
+    "limits": {"auto_handover_turns": 40, "auto_handover_enabled": True},
     "video": {"ffmpeg_path": "ffmpeg"},
     "stickers": {"auto_collect": True},
     "wechat": {"enabled": False, "adb_path": "adb", "device_serial": "", "input_tap_x": 0,
@@ -492,6 +493,7 @@ def t_bot_status(**_):
                        "notes": one("SELECT COUNT(*) FROM session_notes")},
             "intro_shown": bool(load_config().get("intro", {}).get("shown")),
             "setup_completed": bool(load_config().get("setup", {}).get("completed_at")),
+            "session": dict(load_config().get("session", {})),
             "qq": {"enabled": cfg["qq"]["enabled"], "napcat_base_url": cfg["qq"]["napcat_base_url"],
                    "token_set": bool(cfg["qq"]["napcat_token"])},
             "wechat": {"enabled": cfg["wechat"]["enabled"], "adb_path": cfg["wechat"]["adb_path"],
@@ -1499,6 +1501,28 @@ def t_export_transcript(since="", until="", channel="", chat_id="", **_):
     return {"ok": True, "path": path, "count": len(rows)}
 
 
+def t_session_progress(note="", **_):
+    """会话进度标记：每轮用户交互/心跳处理完后调用。新会话由 SessionStart hook 归零。
+    达到 limits.auto_handover_turns（默认 40）时返回 auto_handover=true 触发自动交接：
+    大脑立即总结本会话 → session_note 存档 → 提示用户开新对话页（开新页需用户手动）。"""
+    cfg = load_config()
+    lim = cfg.get("limits", {})
+    if not lim.get("auto_handover_enabled", True):
+        return {"auto_handover": False, "reason": "limits.auto_handover_enabled=false"}
+    turns = int(cfg.get("session", {}).get("turns", 0)) + 1
+    threshold = max(1, int(lim.get("auto_handover_turns", 40)))
+    cfg.setdefault("session", {})
+    cfg["session"]["turns"] = turns
+    if note:
+        cfg["session"]["last_note"] = note[:200]
+    cfg["session"]["updated_at"] = now_str()
+    save_config(cfg)
+    fire = turns >= threshold
+    return {"turns": turns, "threshold": threshold, "auto_handover": fire,
+            **({"hint": "已达自动交接阈值：立即总结本会话 → session_note(action=save) → "
+                        "提示用户新开对话页（新页需用户手动开）"} if fire else {})}
+
+
 PERSONA_CMDS = (
     ("/personahelp", "help"), ("/personas", "list"), ("/botstatus", "status"), ("/persona", "switch"),
     ("切换人格", "switch"), ("人格列表", "list"), ("机器人状态", "status"), ("人格指令", "help"),
@@ -1598,6 +1622,7 @@ TOOLS = {
     "session_note": (t_session_note, "会话接力笔记：换新对话前 save 一份本会话工作总结，新对话开机 list/get 最近几条即可接上脉络（记忆已外置，换页无损）。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["save", "get", "list", "delete"]}, "note_id": {"type": "number"}, "title": {"type": "string"}, "content": {"type": "string"}, "limit": {"type": "number", "default": 5}}}),
     "search_messages": (t_search_messages, "追溯查找全部收发记录：关键词/渠道/联系人/会话/时间范围，记录永久保留。", {"type": "object", "properties": {"keyword": {"type": "string"}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}, "since": {"type": "string"}, "until": {"type": "string"}, "limit": {"type": "number", "default": 50}}}),
     "export_transcript": (t_export_transcript, "把一段时间的收发记录导出为 Markdown 存档（存 ~/.persona-bot/transcripts/），返回文件路径。", {"type": "object", "properties": {"since": {"type": "string"}, "until": {"type": "string"}, "channel": {"type": "string"}, "chat_id": {"type": "string"}}}),
+    "session_progress": (t_session_progress, "会话进度标记：每轮用户交互/心跳后调用；达到 limits.auto_handover_turns 阈值返回 auto_handover=true 触发自动交接（总结存档+提示换页）。新会话由 SessionStart hook 自动归零。", {"type": "object", "properties": {"note": {"type": "string"}}}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}
@@ -1639,7 +1664,7 @@ function nav(){document.getElementById('tabs').innerHTML=tabs.map(t=>`<button cl
 function render(){const v=document.getElementById('view');
  if(tab==='状态'){const c=S.status.counts;v.innerHTML=`<div class="kpi">
   <div>激活人格<b>${esc(S.status.active_persona||'无')}</b></div><div>待处理消息<b>${c.pending_messages}</b></div>
-  <div>待补发<b>${c.outbox}</b></div><div>记忆<b>${c.memories}</b></div><div>表情包<b>${c.stickers}</b></div>
+  <div>待补发<b>${c.outbox}</b></div><div>本轮交互<b>${(S.status.session||{}).turns||0}</b></div><div>记忆<b>${c.memories}</b></div><div>表情包<b>${c.stickers}</b></div>
   <div>规则<b>${c.rules}</b></div><div>collector<b>${S.status.collector.running?'运行中':'未运行'}</b></div></div>
   <p><small>心情：${S.stats.mood} ｜ 数据目录：${esc(S.status.data_dir)}（备份它即备份一切）</small></p>`}
  if(tab==='人格'){v.innerHTML='<table><tr><th>名称</th><th>状态</th><th>prompt（可编辑）</th><th>风格</th><th></th></tr>'+

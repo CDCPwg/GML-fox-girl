@@ -16,7 +16,9 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 
 > 心跳由定时任务触发。**定时任务默认不存在、必须由用户知情开启**（用户说"开启15分钟心跳"才创建，"关闭心跳"即删除），绝不代用户开启。心跳结束调用 `flush_outbox` 补发掉线期间排队的消息，最后用一两句话汇报结果。
 >
-> **页面分工**：`bot_status.setup_completed=false` 时本会话是**配置页**——只做功能设置与开关，聊天请求引导先执行 /persona-finish-setup 再新开聊天区；`=true` 则本会话是聊天区/接力页，正常按本手册服务。会话过长或用户要换页时执行 /persona-handover 接力。
+> **页面分工**：`bot_status.setup_completed=false` 时本会话是**配置页**——只做功能设置与开关，聊天请求引导先执行 /persona-finish-setup 再新开聊天区；`=true` 则本会话是聊天区/接力页，正常按本手册服务。
+>
+> **自动交接**：每轮用户交互或心跳处理完调用 `session_progress()`。返回 `auto_handover=true`（达到 limits.auto_handover_turns，默认 40 轮）时立即执行交接：总结本会话 → `session_note(action=save)` → 明确告诉用户"已自动交接存档，请新开一个对话页，新页说'恢复值机'接上"（开新页需用户手动，插件不能代开）。阈值与开关：limits.auto_handover_turns / limits.auto_handover_enabled；新会话由 SessionStart hook 自动归零。手动交接随时可用 /persona-handover。
 
 1. `bot_status` 快检（首次会话必做；collector 未运行要提醒用户）。
 2. `get_pending_messages` 取未处理消息。每条消息已带发言人 display_name 和关系画像摘要。

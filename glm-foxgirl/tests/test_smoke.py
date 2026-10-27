@@ -143,7 +143,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 36 个工具", len(tools) == 36, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 37 个工具", len(tools) == 37, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -453,6 +453,32 @@ def main():
     c.tool("set_config", {"key": "setup.completed_at", "value": "2026-10-28 12:00"})
     data, _ = c.tool("bot_status")
     check("配置页完成标记", data.get("setup_completed") is True, data)
+
+    print("[v0.11] 自动交接")
+    c.tool("set_config", {"key": "session.turns", "value": 0})
+    data, _ = c.tool("session_progress", {})
+    check("会话进度计数", data.get("turns") == 1 and data.get("auto_handover") is False, data)
+    c.tool("session_progress", {})
+    c.tool("set_config", {"key": "limits.auto_handover_turns", "value": 3})
+    data, _ = c.tool("session_progress", {})
+    check("达到阈值触发自动交接", data.get("turns") == 3 and data.get("auto_handover") is True, data)
+    c.tool("set_config", {"key": "limits.auto_handover_enabled", "value": False})
+    data, _ = c.tool("session_progress", {})
+    check("自动交接可关闭", data.get("auto_handover") is False and bool(data.get("reason")), data)
+    c.tool("set_config", {"key": "limits.auto_handover_enabled", "value": True})
+    data, _ = c.tool("bot_status")
+    check("状态含会话进度", (data.get("session") or {}).get("turns", 0) >= 3, data)
+    hook_env = dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8")
+    script = os.path.join(ROOT, "scripts", "first_run_intro.py")
+    r1 = subprocess.run([sys.executable, script], env=hook_env, capture_output=True, timeout=30)
+    r2 = subprocess.run([sys.executable, script], env=hook_env, capture_output=True, timeout=30)
+    with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
+        cfgj = json.load(f)
+    check("hook 首次输出速览v3并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
+          and "自动交接" in r1.stdout.decode("utf-8", "replace")
+          and (cfgj.get("session") or {}).get("turns") == 0
+          and cfgj.get("intro", {}).get("version") == 3, cfgj.get("session"))
+    check("hook 二次静默", r2.stdout.decode("utf-8", "replace").strip() == "", r2.stdout)
 
     c.close()
     time.sleep(1.0)

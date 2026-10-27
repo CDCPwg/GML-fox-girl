@@ -12,7 +12,7 @@ from datetime import datetime
 DATA = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 CFG = os.path.join(DATA, "config.json")
 
-GUIDE_VERSION = 2
+GUIDE_VERSION = 3
 
 GUIDE = """【GLM狐狸娘 · 功能速览】本页是【配置页】——只用来完成初始设置与功能开关，不在这里聊天。配好后说"完成配置"，然后【新开一个对话】作为日常聊天区（那边开机自动恢复值机）。
 
@@ -27,7 +27,7 @@ GUIDE = """【GLM狐狸娘 · 功能速览】本页是【配置页】——只�
 7. 表情包自动收集（默认开，处理消息时顺带入库、按URL去重）：set_config stickers.auto_collect false 关闭。
 8. 黑白名单：说"把 xx 拉黑"或"只允许 xx 聊"，支持联系人/群/全局粒度。
 9. 心情状态：说"你现在心情低落一点"即可调整说话温度（manage_mood）。
-10. 会话接力与追溯：对话太长想换新页面？说"交接"（/persona-handover）——总结存档后放心开新对话，记忆已外置不丢失，新对话说"恢复值机"接上；查聊天记录用 search_messages 或导出 export_transcript；推荐在专用驾驶舱工作区使用（workspace/AGENTS.md 开机自动恢复值机）。
+10. 会话接力与【自动交接】：聊天区对话过长会自动交接——每轮交互自动计数，达到阈值（默认 40 轮，limits.auto_handover_turns 可改；limits.auto_handover_enabled 可关）就自动总结存档并提醒你开新对话页（开新页这一步需你手动点，插件无法代开）；也可随时手动说"交接"（/persona-handover）。新对话说"恢复值机"接上；查记录 search_messages / export_transcript；推荐专用驾驶舱工作区 workspace/（AGENTS.md 开机自动恢复值机）。
 11. 本地控制台：python server/persona_mcp.py --webui（仅本机）可视化管理人格/记忆/黑白名单/查记录。
 
 人格、记忆、关系画像、黑白名单、表情包、接力笔记全部存在 ~/.persona-bot/，备份该目录即备份一切。
@@ -45,12 +45,13 @@ def main():
             except Exception:
                 cfg = {}
         intro = cfg.get("intro")
-        if (isinstance(intro, dict) and intro.get("shown")
-                and int(intro.get("version", 1)) >= GUIDE_VERSION):
-            return
-        print(GUIDE)
+        stale = not (isinstance(intro, dict) and intro.get("shown")
+                     and int(intro.get("version", 1)) >= GUIDE_VERSION)
+        if stale:
+            print(GUIDE)
         cfg["intro"] = {"shown": True, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "version": GUIDE_VERSION}
+        cfg["session"] = {"started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "turns": 0}
         with open(CFG, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception:
