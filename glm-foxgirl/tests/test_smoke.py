@@ -143,7 +143,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 31 个工具", len(tools) == 31, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 33 个工具", len(tools) == 33, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -401,6 +401,35 @@ def main():
     data, _ = c.tool("bot_status")
     check("状态含记忆图计数", data["counts"].get("graph_nodes") == 4
           and data["counts"].get("graph_edges") == 3, data["counts"])
+
+    print("[v0.9] 微信精确发言人（无障碍读屏 + 通知解析）")
+    sample_xml = ('<?xml version="1.0"?><hierarchy rotation="0">'
+                  '<node index="0" text="" resource-id="" class="android.widget.FrameLayout">'
+                  '<node index="1" text="小明" resource-id="com.tencent.mm:id/name"/>'
+                  '<node index="2" text="晚上一起开黑吗？" resource-id="com.tencent.mm:id/bubble"/>'
+                  '<node index="3" text="" content-desc="返回" resource-id="com.tencent.mm:id/back"/>'
+                  '</node></hierarchy>')
+    data, _ = c.tool("wechat_read_screen", {"xml_text": sample_xml})
+    texts = [t["text"] for t in data.get("texts", [])]
+    check("无障碍读屏精确取字", data.get("count") == 3 and "小明" in texts
+          and "晚上一起开黑吗？" in texts, data)
+    data, err = c.tool("wechat_read_screen", {"xml_text": "<broken"})
+    check("坏 XML 明确报错", err and "解析失败" in data.get("error", ""), (err, data))
+    sample_notif = ('NotificationRecord{u=0 pkg=com.tencent.mm}\n'
+                    '  android.title=Seq("硬盘坏了群")\n'
+                    '  android.text=Seq("硬盘坏了群: 小明: 开黑吗")\n'
+                    'NotificationRecord{u=0 pkg=com.tencent.mm}\n'
+                    '  android.title=Seq("小明")\n'
+                    '  android.text=Seq("私聊内容测试")\n'
+                    'NotificationRecord{u=0 pkg=other.app}\n'
+                    '  android.text=Seq("不该出现")\n')
+    data, _ = c.tool("wechat_read_notifications", {"raw_text": sample_notif})
+    msgs = data.get("messages", [])
+    check("通知解析群聊三元组", any(m.get("group") == "硬盘坏了群" and m.get("speaker") == "小明"
+                                   and m.get("text") == "开黑吗" for m in msgs), data)
+    check("通知解析私聊且过滤其他应用", any(m.get("speaker") == "小明"
+                                          and m.get("text") == "私聊内容测试" for m in msgs)
+          and len(msgs) == 2, data)
 
     c.close()
     time.sleep(1.0)

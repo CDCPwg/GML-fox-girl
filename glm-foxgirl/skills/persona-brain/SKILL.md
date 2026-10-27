@@ -29,7 +29,7 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
    - 表情包自动收集：`stickers.auto_collect` 开启时，每轮最多把 3 张群里出现的新表情包 download 后用 Read 判断情绪，`manage_stickers(action=add, source_url=图片URL, emotion=..)` 入库（同 URL 自动去重）。
    - video 类型：`download_media` → `extract_video_frames` → 用 Read 逐帧理解再回应（缺 ffmpeg 会报错，引导 winget install Gyan.FFmpeg）。
    - poke 戳一戳：用人格的方式反应（GLM娘：炸毛/回戳），可 `poke_qq(group_id, user_id)` 回戳；拿不准就文字吐槽，别过度。
-   - 微信：先 `wechat_screenshot` + Read 确认当前聊天，再操作；发表情包用 `send_wechat_sticker`（需先按 setup 技能校准坐标）。
+   - 微信：**优先 `wechat_read_screen`**（无障碍层级，文字精确、可含群昵称）读当前聊天的文字内容；看图片/表情包仍用 `wechat_screenshot` + Read；后台错过的消息用 `wechat_read_notifications` 从通知补捞；发表情包用 `send_wechat_sticker`（需先按 setup 技能校准坐标）。
 9. 以**人格口吻**生成回复并 `send_qq_message`（QQ）或 `send_wechat_message`（微信）。工具内部已做黑白名单二次校验、随机延迟、限频——**不要**为了"快点"绕过或连续调用轰炸。想配图就 `pick_sticker` 后传 `image_path`。
 10. 沉淀：`store_memory`（经过与感受，有价值的才记）+ `graph_add`（长期事实抽三元组：谁 -关系-> 什么，见"记忆图"节）+ `manage_profile(action=upsert, impression=新增量, affinity_delta=±)` + `mark_processed`。
 

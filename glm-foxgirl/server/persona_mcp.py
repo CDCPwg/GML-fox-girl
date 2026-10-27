@@ -27,7 +27,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -1328,6 +1328,93 @@ def t_graph_query(entity="", depth=1, limit=60, **_):
                 "edges": list(uniq.values())[:max(1, min(int(limit), 100))]}
 
 
+def _parse_ui_xml(xml_text):
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        return {"error": f"XML 解析失败: {e}"}
+    texts = []
+    for el in root.iter("node"):
+        t = (el.get("text") or "").strip()
+        d = (el.get("content-desc") or "").strip()
+        rid = el.get("resource-id") or ""
+        if t:
+            texts.append({"text": t, "resource_id": rid})
+        if d:
+            texts.append({"text": d, "resource_id": rid, "desc": True})
+    return {"texts": texts}
+
+
+def t_wechat_read_screen(xml_text=None, **_):
+    """无障碍层级读屏：uiautomator dump 拿当前屏幕精确文字（比截图 OCR 准，可含群昵称）。
+    传 xml_text 可离线解析（调试/测试用）。"""
+    if xml_text:
+        parsed = _parse_ui_xml(xml_text)
+        if "error" in parsed:
+            raise ValueError(parsed["error"])
+        return {"source": "provided", "count": len(parsed["texts"]), "texts": parsed["texts"],
+                "hint": "按屏幕顺序排列；结合上下文区分气泡/按钮"}
+    serial = resolve_device()
+    run_adb(["-s", serial, "shell", "uiautomator", "dump", "/sdcard/glmfox_ui.xml"], timeout=60)
+    r = run_adb(["-s", serial, "shell", "cat", "/sdcard/glmfox_ui.xml"], timeout=60)
+    xml_text = r.stdout.decode("utf-8", "replace")
+    if "hierarchy" not in xml_text:
+        raise RuntimeError("uiautomator dump 失败：屏幕未就绪或机型限制，稍等重试一次")
+    parsed = _parse_ui_xml(xml_text)
+    if "error" in parsed:
+        raise RuntimeError(parsed["error"])
+    out_path = os.path.join(MEDIA_DIR, f"ui_{int(time.time() * 1000)}.xml")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(xml_text)
+    return {"source": serial, "count": len(parsed["texts"]), "texts": parsed["texts"],
+            "raw_xml": out_path,
+            "hint": "文字精确无 OCR 误差；群聊里昵称通常单独成节点。看图片/表情包仍用 wechat_screenshot"}
+
+
+NOTIF_TEXT_RE = re.compile(r'android\.text=(?:Seq\()?"((?:[^"\\]|\\.)*)"')
+NOTIF_TITLE_RE = re.compile(r'android\.title=(?:Seq\()?"((?:[^"\\]|\\.)*)"')
+
+
+def _parse_notifications(raw):
+    out = []
+    for block in re.split(r"(?=NotificationRecord)", raw):
+        if "com.tencent.mm" not in block:
+            continue
+        tm = NOTIF_TEXT_RE.search(block)
+        tl = NOTIF_TITLE_RE.search(block)
+        body = tm.group(1).strip() if tm else ""
+        title = tl.group(1).strip() if tl else ""
+        if not body and not title:
+            continue
+        m3 = re.match(r"^(.{1,40}?)[：:]\s*(.{1,40}?)[：:]\s*(.+)$", body)
+        m2 = re.match(r"^(.{1,40}?)[：:]\s*(.+)$", body)
+        if m3:
+            out.append({"group": m3.group(1).strip(), "speaker": m3.group(2).strip(),
+                        "text": m3.group(3).strip()})
+        elif m2:
+            out.append({"speaker": m2.group(1).strip(), "text": m2.group(2).strip()})
+        elif title:
+            out.append({"speaker": title, "text": body})
+        elif body:
+            out.append({"speaker": "", "text": body})
+    return out
+
+
+def t_wechat_read_notifications(raw_text=None, **_):
+    """从微信通知栏补捞后台错过的消息（私聊=昵称+内容，群聊=群名+昵称+内容）。
+    需要微信通知权限开启、微信在后台。传 raw_text 可离线解析（调试/测试用）。"""
+    if raw_text is None:
+        serial = resolve_device()
+        r = run_adb(["-s", serial, "shell", "dumpsys", "notification", "--noredact"], timeout=60)
+        raw_text = r.stdout.decode("utf-8", "replace")
+        if "Usage:" in raw_text or len(raw_text) < 200:
+            r = run_adb(["-s", serial, "shell", "dumpsys", "notification"], timeout=60)
+            raw_text = r.stdout.decode("utf-8", "replace")
+    msgs = _parse_notifications(raw_text)
+    return {"count": len(msgs), "messages": msgs,
+            "hint": "捞到的新消息可按 channel=wechat 走心跳循环处理；通知会聚合，同一人连发多句可能合并成一条"}
+
+
 PERSONA_CMDS = (
     ("/personahelp", "help"), ("/personas", "list"), ("/botstatus", "status"), ("/persona", "switch"),
     ("切换人格", "switch"), ("人格列表", "list"), ("机器人状态", "status"), ("人格指令", "help"),
@@ -1422,6 +1509,8 @@ TOOLS = {
     "get_stats": (t_get_stats, "统计报表：7天收发/回复率/主动次数、今日入站、队列、记忆表情包数量、好感TOP、表情包使用TOP。", {"type": "object", "properties": {}}),
     "graph_add": (t_graph_add, "记忆图写入三元组：谁(subject) -关系-> 什么(target)。关系常用：喜欢/讨厌/养了/参与/提到/约定/擅长/在玩。重复添加同一三元组只加权重。", {"type": "object", "properties": {"subject": {"type": "string"}, "relation": {"type": "string"}, "target": {"type": "string"}, "subject_kind": {"type": "string"}, "target_kind": {"type": "string"}, "note": {"type": "string"}}, "required": ["subject", "relation", "target"]}),
     "graph_query": (t_graph_query, "记忆图查询：entity=实体名 从该实体 BFS 扩散 depth 层（1-3），返回关联的人/事/偏好；entity 留空返回按关联度排序的总览。回复前对消息里出现的具体对象调用它可带出联想。", {"type": "object", "properties": {"entity": {"type": "string"}, "depth": {"type": "number", "default": 1}, "limit": {"type": "number", "default": 60}}}),
+    "wechat_read_screen": (t_wechat_read_screen, "无障碍层级读屏：对连接的模拟器/真机执行 uiautomator dump，返回当前屏幕的精确文字节点（无 OCR 误差，群昵称通常单独成节点）。传 xml_text 可离线解析。", {"type": "object", "properties": {"xml_text": {"type": "string"}}}),
+    "wechat_read_notifications": (t_wechat_read_notifications, "从微信通知栏补捞后台错过的消息（私聊=昵称+内容，群聊=群名+昵称+内容）。需要微信通知权限开启。传 raw_text 可离线解析。", {"type": "object", "properties": {"raw_text": {"type": "string"}}}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}
