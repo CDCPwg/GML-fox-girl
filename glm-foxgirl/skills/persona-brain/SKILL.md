@@ -58,6 +58,7 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 
 - 人格库存于外部 SQLite，可建任意多个人格。`manage_persona` 全动作：list / create / update / set_active / delete / **export** / **import**（JSON 文件存 `~/.persona-bot/personas/`，可备份、可分享）。
 - **后台热切换**：用户发 `/persona-switch <名称>`，或直接说"切换到 XX 人格"→ `manage_persona(action=set_active)`。
+- **新建人格**：后台 `/persona-create`（问答式生成，或人设卡文件一键导入）；管理员在聊天里说"新建人格"也可以——用 2-3 个问题问清名字/性格/说话风格再 `manage_persona(action=create)`，用户直接丢人设卡文件时读取提炼后 create；建好按对方意愿 set_active。
 - **QQ/微信内热切换**：管理员在聊天里发指令，下一句话就换人格，无需重启：
   | 指令 | 作用 |
   |---|---|

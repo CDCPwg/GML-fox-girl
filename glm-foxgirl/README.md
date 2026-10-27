@@ -26,6 +26,8 @@
 | `skills/wechat-adb-setup` | 微信（模拟器/USB）接入引导 |
 | `commands/persona-bot` | `/persona-bot` 状态总览 |
 | `commands/persona-switch` | `/persona-switch` 后台人格热切换 |
+| `commands/persona-create` | `/persona-create` 问答式生成人设 / 人设卡一键导入 |
+| `assets/personas/` + `scripts/` | GLM娘初始人设及其安装器（写入人格库并自动激活） |
 
 ## 数据与备份
 
@@ -35,7 +37,7 @@
 
 1. 安装插件后 `/persona-bot` 看状态。
 2. 说"接入QQ"或"接入微信"，按技能引导完成配置。
-3. 说"帮我创建一个人格：……"描述性格、语气、口头禅；建多个人格组成人格库，`/persona-switch` 随时切换。
+3. 说"帮我创建一个人格"，或用 `/persona-create` 问答式生成（也支持直接丢人设卡文件一键导入）；**GLM娘已预置为初始人设**；建多个人格组成人格库，`/persona-switch` 随时切换。
 4. 配置管理员（`admin.qq`）后，在 QQ 里发"切换人格 XX"即可聊天内热切换。
 5. 说"看看有没有新消息"或为工作区建一个定时任务自动轮询处理。
 

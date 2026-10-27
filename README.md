@@ -9,7 +9,8 @@ marketplace.json          ZCode 本地测试市场清单（市场根目录 = 本
 glm-foxgirl/              插件源码：GLM狐狸娘（结构见其 README.md）
 server/persona_mcp.py     核心服务：MCP 服务器（21 工具）+ NapCat 事件收集器
 skills/                   persona-brain 大脑手册 / qq-napcat-setup / wechat-adb-setup
-commands/                 /persona-bot 状态命令、/persona-switch 人格热切换
+commands/                 /persona-bot、/persona-switch（热切换）、/persona-create（问答生成人设）
+assets/personas/          GLM娘初始人设（scripts/install_default_persona.py 安装进人格库）
 tests/test_smoke.py       端到端烟雾测试（36 项，纯标准库）
 ```
 
