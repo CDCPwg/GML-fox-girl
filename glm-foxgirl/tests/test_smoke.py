@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import zlib
@@ -35,6 +36,33 @@ def make_png(path):
            + chunk(b"IEND", b""))
     with open(path, "wb") as f:
         f.write(png)
+
+
+def start_embed_server(port=3977):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n))
+            inputs = body.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            vecs = [[float(t.count("猫")), float(t.count("狗")), float(len(t) % 7) / 7.0]
+                    for t in inputs]
+            out = json.dumps({"data": [{"embedding": v} for v in vecs]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
 
 
 class Client:
@@ -79,7 +107,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 21 个工具", len(tools) == 21, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 24 个工具", len(tools) == 24, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -190,6 +218,40 @@ def main():
     data, _ = c.tool("manage_persona", {"action": "import", "file_path": exported})
     check("重名导入自动唯一化", data.get("name") == "阿玲_2", data)
 
+    print("[v0.5] 向量记忆 / 视频抽帧 / 戳一戳 / 表情包库")
+    data, _ = c.tool("store_memory", {"channel": "qq", "contact_id": "10001", "content": "阿明想学吉他"})
+    check("未配置 embedding 时记忆照存", data.get("ok") and data.get("embedded") is False, data)
+    srv = start_embed_server(3977)
+    c.tool("set_config", {"key": "memory.embed_base_url", "value": "http://127.0.0.1:3977"})
+    data, _ = c.tool("store_memory", {"channel": "qq", "contact_id": "10001",
+                                      "content": "阿明家的猫叫煤球，特别胖"})
+    check("配置后记忆自动向量化", data.get("embedded") is True, data)
+    c.tool("store_memory", {"channel": "qq", "contact_id": "10001", "content": "阿明想养一只狗"})
+    data, _ = c.tool("query_memory", {"contact_id": "10001", "keyword": "他家的猫", "semantic": True})
+    top = (data.get("memories") or [{}])[0]
+    check("语义检索命中猫且带相似度", "煤球" in top.get("content", "")
+          and top.get("similarity", 0) > 0, data)
+    srv.shutdown()
+
+    ffmpeg_video = os.path.join(tmp, "test.mp4")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=2",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", ffmpeg_video],
+                   capture_output=True, timeout=60)
+    data, err = c.tool("extract_video_frames", {"video_path": ffmpeg_video})
+    check("视频抽帧(ffmpeg)", not err and len(data.get("frames", [])) >= 2
+          and all(os.path.exists(p) for p in data["frames"]), (err, data))
+
+    data, err = c.tool("poke_qq", {"group_id": "777", "user_id": "10001"})
+    check("戳一戳渠道未启用时报错", err and "未启用" in data.get("error", ""), (err, data))
+    data, err = c.tool("send_wechat_sticker", {"file_path": png})
+    check("微信发表情包无设备时报错", err and "adb" in data.get("error", "").lower(), (err, data))
+    data, _ = c.tool("manage_stickers", {"action": "add", "file_path": png, "emotion": "happy",
+                                         "source_url": "https://example.com/s1.jpg"})
+    data2, _ = c.tool("manage_stickers", {"action": "add", "file_path": png, "emotion": "happy",
+                                          "source_url": "https://example.com/s1.jpg"})
+    check("表情包按 URL 去重", data.get("ok") and not data.get("deduped")
+          and data2.get("deduped") is True, (data, data2))
+
     c.close()
     time.sleep(1.0)
 
@@ -223,6 +285,11 @@ def main():
                                      data=json.dumps(ev2).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
         urllib.request.urlopen(req, timeout=5).read()
+        ev3 = {"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
+               "group_id": 888, "user_id": 2001, "target_id": 999999}
+        req = urllib.request.Request(url, data=json.dumps(ev3).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(req, timeout=5).read()
         time.sleep(1.0)
         db = sqlite3.connect(os.path.join(tmp2, "persona.db"))
         db.row_factory = sqlite3.Row
@@ -234,6 +301,9 @@ def main():
             check("collector 收到私聊(CQ码格式)", rows[1]["chat_id"] == "2002"
                   and rows[1]["content"] == "晚上好"
                   and rows[1]["media_url"] == "https://example.com/y.jpg", rows[1])
+        if len(rows) >= 3:
+            check("collector 收到戳一戳并入库", rows[2]["msg_type"] == "poke"
+                  and "2001" in rows[2]["content"], rows[2])
         profs = [dict(r) for r in db.execute("SELECT * FROM profiles")]
         check("发言人群名片自动写入画像", any(p["display_name"] == "群友A" for p in profs), profs)
         db.close()

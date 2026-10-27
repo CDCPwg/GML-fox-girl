@@ -1,6 +1,6 @@
 # glm-foxgirl · GLM狐狸娘（QQ/微信人格伴侣）
 
-让 ZCode 作为"大脑"，以自定义人格在 QQ 和微信里与真人互动：被动回复 + 主动聊天、认识群里每个发言人、识别图片/表情包、长期记忆与关系画像、黑白名单权限、拟人化防风控、**人格库热切换**（后台 `/persona-switch` 或聊天内管理员指令）。
+让 ZCode 作为"大脑"，以自定义人格在 QQ 和微信里与真人互动：被动回复（定时心跳全自动）+ 主动聊天、认识群里每个发言人、识别图片/表情包/视频（抽帧）、长期记忆（可语义向量检索）与关系画像、黑白名单权限、拟人化防风控、**人格库热切换**（后台 `/persona-switch` 或聊天内管理员指令）、表情包自动收集、戳一戳互动。
 
 ## 架构
 
@@ -20,7 +20,7 @@
 
 | 路径 | 作用 |
 |---|---|
-| `server/persona_mcp.py` | MCP 服务器（21 个工具，含 `bot_command` 管理指令入口）+ NapCat 事件收集器。`--collector` 可独立 24/7 运行 |
+| `server/persona_mcp.py` | MCP 服务器（24 个工具：bot_command 指令、语义记忆、视频抽帧、poke_qq 等）+ NapCat 事件收集器。`--collector` 可独立 24/7 运行 |
 | `skills/persona-brain` | 大脑运作手册：心跳循环、回复必要性、防风控纪律、记忆规范、人格库指令 |
 | `skills/qq-napcat-setup` | QQ 接入引导 |
 | `skills/wechat-adb-setup` | 微信（模拟器/USB）接入引导 |
@@ -43,12 +43,12 @@
 
 ## 迭代路线（参考开源项目）
 
-- v1.1 微信图片/表情包发送（media push + 分享面板自动化）
-- v1.2 语音消息（QQ 语音收发，参考 chatgpt-on-wechat 的语音链路）
-- v1.3 语义向量检索长期记忆（参考 AstrBot memorix：图谱+向量混合）
-- v1.4 记忆遗忘曲线与情绪效价（参考 astrbot_plugin_memory_system）
-- v1.5 Android 无障碍服务读微信精确发言人（替代截图方案）
-- v1.6 WebUI 管理面板
+- ~~v0.4 定时心跳全自动收发~~ 已完成
+- ~~v0.5 语义向量记忆 / 视频抽帧识别 / 表情包自动收集 / 戳一戳 / 微信发表情包~~ 已完成
+- v0.6 记忆遗忘曲线与情绪效价（参考 astrbot_plugin_memory_system）
+- v0.7 SillyTavern 角色卡导入 + 心情状态层
+- v0.8 发送队列与 NapCat 掉线重试、统计报表
+- v1.0 Android 无障碍服务读微信精确发言人、WebUI 管理面板
 
 ## 风险声明
 

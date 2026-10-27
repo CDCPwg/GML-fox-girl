@@ -35,6 +35,17 @@ v1 能力边界（要如实告知）：可以**读**截图里的文字/图片/�
 - 发送前设备必须**停留在目标聊天窗口**（v1 不自动导航聊天列表）。
 - 微信图片/表情包的"识别"流程：`wechat_screenshot` → Read 识图 → 决策 → 文字回复。
 
+## 表情包发送坐标校准（v0.5+）
+
+`send_wechat_sticker` 依赖 4 组点击坐标（⊕ 按钮 → 相册 → 第一张图 → 发送按钮）：
+
+1. 手机停在目标聊天，`wechat_screenshot` 截图并用 Read 查看，记下右下角 ⊕ 的中心坐标。
+2. 依次走到每一步各截一次图，记录 相册 / 第一张图 / 发送按钮 的坐标。
+3. `set_config` 写入 8 项：`wechat.plus_tap_x/y`、`wechat.album_tap_x/y`、`wechat.first_image_tap_x/y`、`wechat.send_btn_tap_x/y`。
+4. `send_wechat_sticker(file_path=表情包库路径)` 试发一次，卡住就截图微调。
+
+注意：相册按时间倒序，刚 push 的图通常在第一张；换设备/换分辨率需重新校准。
+
 ## 风控提示（要主动告知用户）
 
 - 模拟器有设备指纹风险；保持默认拟人延迟，不要手动高频调用 send。

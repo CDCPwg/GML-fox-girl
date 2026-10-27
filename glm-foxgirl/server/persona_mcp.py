@@ -25,7 +25,7 @@ import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.3.0"
+VERSION = "0.5.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -40,6 +40,9 @@ DEFAULT_CONFIG = {
     "humanize": {"reply_delay_min_ms": 1200, "reply_delay_max_ms": 6000, "max_per_chat_per_hour": 12},
     "proactive": {"enabled": False, "quiet_hours": "23:30-07:30", "max_per_day": 5, "reply_probability_group": 0.3},
     "admin": {"qq": [], "wechat": []},
+    "memory": {"embed_base_url": "", "embed_api_key": "", "embed_model": "embedding-3"},
+    "video": {"ffmpeg_path": "ffmpeg"},
+    "stickers": {"auto_collect": True},
     "collector": {"host": "127.0.0.1", "port": 3001, "token": ""},
 }
 
@@ -51,7 +54,7 @@ CREATE TABLE IF NOT EXISTS personas(
 CREATE TABLE IF NOT EXISTS memories(
   id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT DEFAULT '', chat_id TEXT DEFAULT '',
   contact_id TEXT DEFAULT '', kind TEXT DEFAULT 'event', importance INTEGER DEFAULT 3,
-  content TEXT NOT NULL, created_at TEXT);
+  content TEXT NOT NULL, embedding TEXT DEFAULT '', created_at TEXT);
 CREATE TABLE IF NOT EXISTS profiles(
   id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, contact_id TEXT NOT NULL,
   display_name TEXT DEFAULT '', impression TEXT DEFAULT '', style_notes TEXT DEFAULT '',
@@ -62,7 +65,8 @@ CREATE TABLE IF NOT EXISTS rules(
   created_at TEXT, UNIQUE(list_type, channel, scope, target_id));
 CREATE TABLE IF NOT EXISTS stickers(
   id INTEGER PRIMARY KEY AUTOINCREMENT, file_path TEXT NOT NULL, emotion TEXT DEFAULT '',
-  tags TEXT DEFAULT '', source TEXT DEFAULT '', use_count INTEGER DEFAULT 0, created_at TEXT);
+  tags TEXT DEFAULT '', source TEXT DEFAULT '', source_url TEXT DEFAULT '',
+  use_count INTEGER DEFAULT 0, created_at TEXT);
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT, direction TEXT DEFAULT 'in', channel TEXT DEFAULT '',
   chat_type TEXT DEFAULT '', chat_id TEXT DEFAULT '', contact_id TEXT DEFAULT '',
@@ -78,6 +82,14 @@ def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _migrate():
+    for table, col, decl in (("memories", "embedding", "TEXT DEFAULT ''"),
+                             ("stickers", "source_url", "TEXT DEFAULT ''")):
+        cols = {r[1] for r in CONN.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            CONN.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
 def init_db():
     global CONN
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -86,6 +98,7 @@ def init_db():
     CONN.row_factory = sqlite3.Row
     with LOCK:
         CONN.executescript(SCHEMA)
+        _migrate()
         CONN.commit()
 
 
@@ -181,6 +194,34 @@ def in_quiet_hours(spec, now=None):
         return (t >= s or t < e) if s >= e else (s <= t < e)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------- embeddings
+
+def embed_text(text):
+    cfg = load_config().get("memory", {})
+    base = (cfg.get("embed_base_url") or "").strip()
+    if not base:
+        return None
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("embed_api_key"):
+        headers["Authorization"] = "Bearer " + cfg["embed_api_key"]
+    body = {"model": cfg.get("embed_model", "embedding-3"), "input": text}
+    req = urllib.request.Request(base.rstrip("/") + "/embeddings",
+                                 data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return [float(x) for x in data["data"][0]["embedding"]]
+    except Exception:
+        return None
+
+
+def _cosine(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
 
 
 # ---------------------------------------------------------------- NapCat (QQ)
@@ -319,6 +360,22 @@ def store_inbound(ev):
         CONN.commit()
 
 
+def store_poke(ev):
+    operator = str(ev.get("user_id") or "")
+    if not operator:
+        return
+    target = str(ev.get("target_id") or "")
+    chat_type = "group" if ev.get("group_id") else "private"
+    chat_id = str(ev.get("group_id") or operator)
+    with LOCK:
+        CONN.execute(
+            "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, msg_type,"
+            " content, media_json, processed, created_at)"
+            " VALUES('in','qq',?,?,'','poke',?,'[]',0,?)",
+            (chat_type, chat_id, f"[戳一戳] {operator} 戳了 {target or '我'}", now_str()))
+        CONN.commit()
+
+
 class EventHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path != "/onebot/event":
@@ -338,6 +395,9 @@ class EventHandler(BaseHTTPRequestHandler):
             ev = json.loads(body.decode("utf-8"))
             if ev.get("post_type") == "message":
                 store_inbound(ev)
+            elif ev.get("post_type") == "notice" and (
+                    ev.get("sub_type") == "poke" or "poke" in str(ev.get("notice_type", ""))):
+                store_poke(ev)
         except Exception:
             pass
         self.send_response(204)
@@ -394,6 +454,8 @@ def t_bot_status(**_):
             "wechat": {"enabled": cfg["wechat"]["enabled"], "adb_path": cfg["wechat"]["adb_path"],
                        "adb_found": bool(shutil.which(cfg["wechat"]["adb_path"])) or os.path.sep in cfg["wechat"]["adb_path"],
                        "device_serial": cfg["wechat"]["device_serial"] or "(自动检测)"},
+            "memory_embed": bool(load_config().get("memory", {}).get("embed_base_url")),
+            "ffmpeg": bool(shutil.which(load_config().get("video", {}).get("ffmpeg_path", "ffmpeg"))),
             "collector": {"port": cfg["collector"]["port"], "running": collector_running(),
                           "url": f"http://{cfg['collector']['host']}:{cfg['collector']['port']}/onebot/event"},
         }
@@ -675,18 +737,20 @@ def t_store_memory(content, channel="", chat_id="", contact_id="", kind="event",
     if not content:
         raise ValueError("content 不能为空")
     importance = max(1, min(5, int(importance)))
+    vec = embed_text(content)
     with LOCK:
-        CONN.execute(
-            "INSERT INTO memories(channel, chat_id, contact_id, kind, importance, content, created_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (channel or "", str(chat_id or ""), str(contact_id or ""), kind, importance, content, now_str()))
+        cur = CONN.execute(
+            "INSERT INTO memories(channel, chat_id, contact_id, kind, importance, content, embedding, created_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (channel or "", str(chat_id or ""), str(contact_id or ""), kind, importance, content,
+             json.dumps(vec) if vec else "", now_str()))
         CONN.commit()
-    return {"ok": True}
+        return {"ok": True, "memory_id": cur.lastrowid, "embedded": bool(vec)}
 
 
-def t_query_memory(keyword=None, contact_id=None, chat_id=None, channel=None, limit=10, **_):
+def t_query_memory(keyword=None, contact_id=None, chat_id=None, channel=None, limit=10, semantic=False, **_):
     q, args = "SELECT * FROM memories WHERE 1=1", []
-    if keyword:
+    if keyword and not semantic:
         q += " AND content LIKE ?"
         args.append(f"%{keyword}%")
     if contact_id:
@@ -695,10 +759,26 @@ def t_query_memory(keyword=None, contact_id=None, chat_id=None, channel=None, li
         q += " AND chat_id=?"; args.append(str(chat_id))
     if channel:
         q += " AND channel=?"; args.append(channel)
+    cap = 200 if semantic else max(1, min(int(limit), 50))
     q += " ORDER BY importance DESC, id DESC LIMIT ?"
-    args.append(max(1, min(int(limit), 50)))
+    args.append(cap)
     with LOCK:
         rows = [dict(r) for r in CONN.execute(q, args).fetchall()]
+    if semantic and keyword:
+        qv = embed_text(keyword)
+        if qv:
+            scored = []
+            for r in rows:
+                if not r.get("embedding"):
+                    continue
+                try:
+                    scored.append((r, _cosine(qv, json.loads(r["embedding"]))))
+                except Exception:
+                    continue
+            if scored:
+                scored.sort(key=lambda t: -t[1])
+                rows = [{**r, "similarity": round(s, 4)} for r, s in scored]
+    rows = rows[:max(1, min(int(limit), 50))]
     return {"count": len(rows), "memories": rows}
 
 
@@ -771,14 +851,19 @@ def t_manage_rules(action, list_type=None, scope="contact", channel="*", target_
     raise ValueError(f"未知 action: {action}")
 
 
-def t_manage_stickers(action, file_path=None, emotion="", tags="", source="", sticker_id=None, **_):
+def t_manage_stickers(action, file_path=None, emotion="", tags="", source="", source_url=None, sticker_id=None, **_):
     with LOCK:
         if action == "add":
             if not file_path or not os.path.exists(file_path):
                 raise ValueError(f"file_path 不存在: {file_path}")
+            if source_url:
+                dup = CONN.execute("SELECT id FROM stickers WHERE source_url=?", (source_url,)).fetchone()
+                if dup:
+                    return {"ok": True, "deduped": True, "sticker_id": dup["id"]}
             cur = CONN.execute(
-                "INSERT INTO stickers(file_path, emotion, tags, source, created_at) VALUES(?,?,?,?,?)",
-                (os.path.abspath(file_path), emotion, tags, source, now_str()))
+                "INSERT INTO stickers(file_path, emotion, tags, source, source_url, created_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (os.path.abspath(file_path), emotion, tags, source, source_url or "", now_str()))
             CONN.commit()
             return {"ok": True, "sticker_id": cur.lastrowid}
         if action == "list":
@@ -828,6 +913,96 @@ def t_proactive_due(**_):
         return {"proactive_allowed": False, "reason": f"今日主动消息已达上限 {mx}"}
     return {"proactive_allowed": True, "used_today": used, "max_per_day": mx,
             "group_reply_probability": cfg.get("reply_probability_group", 0.3)}
+
+
+def t_poke_qq(group_id, user_id, **_):
+    decision = access_decision("qq", "group", str(group_id), None)
+    if not decision["allowed"]:
+        return {"sent": False, "blocked": True, **decision}
+    ok, why = rate_limit_check("qq", str(group_id))
+    if not ok:
+        return {"sent": False, "blocked": True, "reason": why}
+    resp = napcat_post("group_poke", {"group_id": int(group_id), "user_id": int(user_id)})
+    with LOCK:
+        CONN.execute(
+            "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, msg_type,"
+            " content, out_kind, processed, created_at)"
+            " VALUES('out','qq','group',?,?,'poke','[戳一戳]','reply',1,?)",
+            (str(group_id), str(user_id), now_str()))
+        CONN.commit()
+    return {"sent": True, "napcat_status": resp.get("status")}
+
+
+def t_send_wechat_sticker(file_path, **_):
+    if not file_path or not os.path.exists(file_path):
+        raise ValueError(f"file_path 不存在: {file_path}")
+    serial = resolve_device()
+    cfgw = load_config()["wechat"]
+    taps = [("plus_tap_x", "plus_tap_y", "聊天右下角 ⊕ 按钮"),
+            ("album_tap_x", "album_tap_y", "面板中的 相册"),
+            ("first_image_tap_x", "first_image_tap_y", "相册列表第一张图"),
+            ("send_btn_tap_x", "send_btn_tap_y", "右下角 发送 按钮")]
+    missing = [label for kx, ky, label in taps if not cfgw.get(kx) or not cfgw.get(ky)]
+    if missing:
+        raise ValueError(
+            "微信发表情包需先校准 4 组点击坐标（缺：" + "、".join(missing) + "）。"
+            "先 wechat_screenshot 截图定坐标，再 set_config 写入 wechat.plus_tap_x/plus_tap_y/"
+            "album_tap_x/album_tap_y/first_image_tap_x/first_image_tap_y/"
+            "send_btn_tap_x/send_btn_tap_y 共 8 项。")
+    ok, why = rate_limit_check("wechat", "active")
+    if not ok:
+        return {"sent": False, "blocked": True, "reason": why}
+    human_delay()
+    remote = f"/sdcard/Pictures/glmfox_{int(time.time() * 1000)}.png"
+    run_adb(["-s", serial, "push", os.path.abspath(file_path), remote], timeout=60)
+    run_adb(["-s", serial, "shell", "am", "broadcast", "-a",
+             "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", "file://" + remote])
+    time.sleep(1.5)
+    for kx, ky, _label in taps:
+        run_adb(["-s", serial, "shell", "input", "tap", str(int(cfgw[kx])), str(int(cfgw[ky]))])
+        time.sleep(random.uniform(0.8, 1.6))
+    with LOCK:
+        CONN.execute(
+            "INSERT INTO messages(direction, channel, chat_type, chat_id, msg_type, content,"
+            " media_path, out_kind, processed, created_at)"
+            " VALUES('out','wechat','private','active','sticker','[表情包]',?,'reply',1,?)",
+            (os.path.abspath(file_path), now_str()))
+        CONN.commit()
+    return {"sent": True, "device": serial,
+            "note": "已按校准坐标发送；如卡在某一步，wechat_screenshot 检查并重新校准"}
+
+
+def t_extract_video_frames(video_path, frames=4, **_):
+    if not video_path or not os.path.exists(video_path):
+        raise ValueError(f"video_path 不存在: {video_path}")
+    ffmpeg = load_config().get("video", {}).get("ffmpeg_path", "ffmpeg")
+    exe = shutil.which(ffmpeg) or (ffmpeg if os.path.sep in ffmpeg and os.path.exists(ffmpeg) else None)
+    if not exe:
+        raise RuntimeError("未找到 ffmpeg，无法抽帧。安装：winget install Gyan.FFmpeg，"
+                           "或 set_config video.ffmpeg_path 指向 ffmpeg.exe 全路径")
+    frames = max(2, min(int(frames), 8))
+    r = None
+    duration = 0.0
+    try:
+        r = subprocess.run([exe, "-v", "error", "-show_entries", "format=duration",
+                            "-of", "csv=p=0", video_path], capture_output=True, timeout=60)
+        duration = float(r.stdout.decode("utf-8", "replace").strip() or 0)
+    except Exception:
+        duration = 0.0
+    fdir = os.path.join(MEDIA_DIR, "frames", f"v{int(time.time() * 1000)}")
+    os.makedirs(fdir, exist_ok=True)
+    if duration > 0:
+        cmd = [exe, "-y", "-i", video_path, "-vf", f"fps={frames / duration:.4f}",
+               "-frames:v", str(frames + 2), os.path.join(fdir, "f_%02d.jpg")]
+    else:
+        cmd = [exe, "-y", "-i", video_path, "-vf", "fps=1",
+               "-frames:v", str(frames), os.path.join(fdir, "f_%02d.jpg")]
+    subprocess.run(cmd, capture_output=True, timeout=120)
+    paths = [os.path.join(fdir, f) for f in sorted(os.listdir(fdir))]
+    if not paths:
+        detail = r.stderr.decode("utf-8", "replace")[:200] if (duration > 0 and r) else "ffmpeg 无输出"
+        raise RuntimeError("抽帧失败：" + detail)
+    return {"frames": paths, "hint": "用 Read 逐帧查看以理解视频内容"}
 
 
 PERSONA_CMDS = (
@@ -907,13 +1082,16 @@ TOOLS = {
     "download_media": (t_download_media, "下载 QQ 消息里的图片/表情包/视频到本地并返回路径，随后可用 Read 工具做视觉识别。", {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
     "manage_persona": (t_manage_persona, "人格管理：list / create(name,prompt,style) / update / set_active / delete。prompt 是人格核心设定（性格、语气、口头禅、边界）。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "create", "update", "set_active", "delete"]}, "name": {"type": "string"}, "prompt": {"type": "string"}, "style": {"type": "string"}, "persona_id": {"type": "number"}}, "required": ["action"]}),
     "store_memory": (t_store_memory, "写入长期记忆（外部 SQLite）。值得记：承诺、对方偏好、重要事件、关系变化。importance 1-5。", {"type": "object", "properties": {"content": {"type": "string"}, "channel": {"type": "string"}, "chat_id": {"type": "string"}, "contact_id": {"type": "string"}, "kind": {"type": "string"}, "importance": {"type": "number", "default": 3}}, "required": ["content"]}),
-    "query_memory": (t_query_memory, "按关键词/联系人/会话检索长期记忆，重要级优先。回复前检索相关记忆能显著提升连续性。", {"type": "object", "properties": {"keyword": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}, "channel": {"type": "string"}, "limit": {"type": "number", "default": 10}}}),
+    "query_memory": (t_query_memory, "按关键词/联系人/会话检索长期记忆，重要级优先。配置 memory.embed_base_url 后可 semantic=true + 关键词做语义排序（此时关键词只当查询语义，不再过滤）。回复前检索相关记忆能显著提升连续性。", {"type": "object", "properties": {"keyword": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}, "channel": {"type": "string"}, "limit": {"type": "number", "default": 10}, "semantic": {"type": "boolean", "default": False}}}),
     "manage_profile": (t_manage_profile, "关系画像：get / upsert(channel,contact_id,impression,style_notes,affinity_delta) / list。每个联系人独立印象档案，affinity -100~100。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["get", "upsert", "list"]}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "display_name": {"type": "string"}, "impression": {"type": "string"}, "style_notes": {"type": "string"}, "affinity_delta": {"type": "number"}}, "required": ["action"]}),
     "manage_rules": (t_manage_rules, "黑白名单管理：add/remove/list。list_type=blacklist|whitelist，scope=contact|group|global，channel=qq|wechat|*。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["add", "remove", "list"]}, "list_type": {"type": "string", "enum": ["blacklist", "whitelist"]}, "scope": {"type": "string", "enum": ["contact", "group", "global"]}, "channel": {"type": "string"}, "target_id": {"type": "string"}, "note": {"type": "string"}}, "required": ["action"]}),
-    "manage_stickers": (t_manage_stickers, "表情包库：add(本地图片路径,emotion,tags) / list / delete。emotion 建议用 happy/sad/angry/love/awkward/food 等标签。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["add", "list", "delete"]}, "file_path": {"type": "string"}, "emotion": {"type": "string"}, "tags": {"type": "string"}, "source": {"type": "string"}, "sticker_id": {"type": "number"}}, "required": ["action"]}),
+    "manage_stickers": (t_manage_stickers, "表情包库：add(本地图片路径,emotion,tags,source_url) / list / delete。emotion 建议用 happy/sad/angry/love/awkward/food 等标签；带 source_url 时自动按 URL 去重。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["add", "list", "delete"]}, "file_path": {"type": "string"}, "emotion": {"type": "string"}, "tags": {"type": "string"}, "source": {"type": "string"}, "source_url": {"type": "string"}, "sticker_id": {"type": "number"}}, "required": ["action"]}),
     "pick_sticker": (t_pick_sticker, "按情绪挑选表情包返回本地路径（自动避免连用同一张），配合 send_qq_message 的 image_path 发送。", {"type": "object", "properties": {"emotion": {"type": "string"}}}),
     "proactive_due": (t_proactive_due, "判断现在是否允许主动发起聊天（enabled、安静时段、每日上限）。主动发言前必须调用。", {"type": "object", "properties": {}}),
     "bot_command": (t_bot_command, "管理指令入口（管理员在 QQ/微信聊天里热切换人格）。对每条入站消息先调用：handled=true 时发送 reply 并结束该条处理；handled=false 继续正常人格流程。指令：切换人格 <名称>、人格列表、机器人状态、人格指令。管理员配置在 admin.qq / admin.wechat。", {"type": "object", "properties": {"text": {"type": "string"}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "chat_id": {"type": "string"}}, "required": ["text"]}),
+    "poke_qq": (t_poke_qq, "在 QQ 群里戳一戳某人（拟人化互动或回应被戳）。内置黑白名单与限频。", {"type": "object", "properties": {"group_id": {"type": "string"}, "user_id": {"type": "string"}}, "required": ["group_id", "user_id"]}),
+    "send_wechat_sticker": (t_send_wechat_sticker, "微信发送本地表情包图片（需先校准 4 组点击坐标，见报错提示与 wechat-adb-setup 技能）。内置拟人延迟与限频。", {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}),
+    "extract_video_frames": (t_extract_video_frames, "视频抽帧：对已下载到本地的视频均匀抽取若干帧返回图片路径，再用 Read 逐帧理解内容。需要 ffmpeg（winget install Gyan.FFmpeg）。", {"type": "object", "properties": {"video_path": {"type": "string"}, "frames": {"type": "number", "default": 4}}, "required": ["video_path"]}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}

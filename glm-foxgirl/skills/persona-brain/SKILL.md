@@ -22,11 +22,14 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 4. `check_access`（channel, chat_type, chat_id, contact_id）——黑名单命中或不在白名单：**直接跳过**，不回复、不记忆。
 5. **管理指令检查**：调用 `bot_command(text, channel, contact_id, chat_id)`。返回 `handled=true`：allowed=false（非管理员）或有 reply 就按原渠道把 reply 发出去（这就是管理员在 QQ/微信里热切换人格的入口），然后 `mark_processed` 结束本条；`handled=false` 继续正常流程。
 6. 群聊先做**回复必要性判断**（见下节）；决定不回就只沉淀记忆、更新画像。
-7. 取上下文：`manage_persona(action=list)` 里取 active 人格的 prompt+style（**每轮消息都现取，人格热切换即时生效**）；`query_memory(keyword=话题关键词, contact_id=发言人)`；`manage_profile(action=get)`。
+7. 取上下文：`manage_persona(action=list)` 里取 active 人格的 prompt+style（**每轮消息都现取，人格热切换即时生效**）；`query_memory(keyword=相关话题短语, contact_id=发言人, semantic=True)`（配置了 memory.embed_base_url 时按语义排序）；`manage_profile(action=get)`。
 8. **多媒体处理**：
    - image 类型：`download_media` 下载后用 Read 识图，再决定怎么回。
    - 认出是表情包：理解其情绪，可用 `pick_sticker(emotion)` 选一张回敬。
-   - 微信：先 `wechat_screenshot` + Read 确认当前聊天，再操作。
+   - 表情包自动收集：`stickers.auto_collect` 开启时，每轮最多把 3 张群里出现的新表情包 download 后用 Read 判断情绪，`manage_stickers(action=add, source_url=图片URL, emotion=..)` 入库（同 URL 自动去重）。
+   - video 类型：`download_media` → `extract_video_frames` → 用 Read 逐帧理解再回应（缺 ffmpeg 会报错，引导 winget install Gyan.FFmpeg）。
+   - poke 戳一戳：用人格的方式反应（GLM娘：炸毛/回戳），可 `poke_qq(group_id, user_id)` 回戳；拿不准就文字吐槽，别过度。
+   - 微信：先 `wechat_screenshot` + Read 确认当前聊天，再操作；发表情包用 `send_wechat_sticker`（需先按 setup 技能校准坐标）。
 9. 以**人格口吻**生成回复并 `send_qq_message`（QQ）或 `send_wechat_message`（微信）。工具内部已做黑白名单二次校验、随机延迟、限频——**不要**为了"快点"绕过或连续调用轰炸。想配图就 `pick_sticker` 后传 `image_path`。
 10. 沉淀：`store_memory`（有价值的才记）+ `manage_profile(action=upsert, impression=新增量, affinity_delta=±)` + `mark_processed`。
 
@@ -91,4 +94,5 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 | 新建/切换人格 | manage_persona |
 | 调延迟/限频/安静时段/主动概率 | set_config |
 | 查某人的记忆/画像 | query_memory、manage_profile get |
-| 收表情包（把图片存进库） | manage_stickers add + emotion/tags |
+| 收表情包（把图片存进库） | manage_stickers add + emotion/tags（带 source_url 自动去重） |
+| 语义记忆服务 | set_config memory.embed_base_url / memory.embed_api_key / memory.embed_model |
