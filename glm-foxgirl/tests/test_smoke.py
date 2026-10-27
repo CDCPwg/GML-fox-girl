@@ -75,7 +75,7 @@ def main():
     c = Client(tmp)
 
     r = c.call("initialize", {"protocolVersion": "2024-11-05"})
-    check("MCP initialize 握手", r["result"]["serverInfo"]["name"] == "persona-bot")
+    check("MCP initialize 握手", r["result"]["serverInfo"]["name"] == "glm-foxgirl")
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]

@@ -25,7 +25,7 @@ import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -358,9 +358,9 @@ def start_collector_thread():
         COLLECTOR_SERVER = ThreadingHTTPServer((host, port), EventHandler)
         t = threading.Thread(target=COLLECTOR_SERVER.serve_forever, daemon=True)
         t.start()
-        print(f"[persona-bot] collector listening on http://{host}:{port}/onebot/event", file=sys.stderr)
+        print(f"[glm-foxgirl] collector listening on http://{host}:{port}/onebot/event", file=sys.stderr)
     except OSError:
-        print(f"[persona-bot] port {port} busy, assuming an external collector is running", file=sys.stderr)
+        print(f"[glm-foxgirl] port {port} busy, assuming an external collector is running", file=sys.stderr)
 
 
 def collector_running():
@@ -925,7 +925,7 @@ def handle_call(method, params):
     if method == "initialize":
         return {"protocolVersion": (params or {}).get("protocolVersion") or "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "persona-bot", "version": VERSION}}
+                "serverInfo": {"name": "glm-foxgirl", "version": VERSION}}
     if method == "ping":
         return {}
     if method == "tools/list":
@@ -978,7 +978,7 @@ def main():
     if "--collector" in sys.argv:
         cfg = load_config()["collector"]
         srv = ThreadingHTTPServer((cfg.get("host", "127.0.0.1"), int(cfg.get("port", 3001))), EventHandler)
-        print(f"[persona-bot] collector daemon on http://{cfg['host']}:{cfg['port']}/onebot/event (Ctrl+C 退出)", file=sys.stderr)
+        print(f"[glm-foxgirl] collector daemon on http://{cfg['host']}:{cfg['port']}/onebot/event (Ctrl+C 退出)", file=sys.stderr)
         srv.serve_forever()
     else:
         main_mcp()

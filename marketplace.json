@@ -2,16 +2,16 @@
   "name": "dev-persona-bot-local",
   "plugins": [
     {
-      "name": "qq-wechat-persona",
-      "source": "./qq-wechat-persona",
-      "version": "0.2.0",
-      "description": "Persona companion bot for QQ and WeChat: ZCode acts as the brain; NapCat carries QQ traffic; ADB drives WeChat on an emulator or USB phone. Persona management, SQLite long-term memory, relationship profiles, sticker library, blacklist/whitelist, human-like rate limiting, proactive chat.",
-      "displayName": "QQ/WeChat 人格伴侣",
+      "name": "glm-foxgirl",
+      "source": "./glm-foxgirl",
+      "version": "0.2.1",
+      "description": "GLM Foxgirl persona companion bot for QQ and WeChat: ZCode acts as the brain; NapCat carries QQ traffic; ADB drives WeChat on an emulator or USB phone. Persona library with hot-switching commands, SQLite long-term memory, relationship profiles, sticker library, blacklist/whitelist, human-like rate limiting, proactive chat.",
+      "displayName": "GLM狐狸娘",
       "displayName_i18n": {
-        "zh-CN": "QQ/WeChat 人格伴侣"
+        "zh-CN": "GLM狐狸娘"
       },
       "description_i18n": {
-        "zh-CN": "ZCode 即大脑的 QQ/微信人格机器人：人格管理、长期记忆、关系画像、表情包库、黑白名单、拟人防风控、主动聊天。QQ 走 NapCat 协议，微信走 ADB（模拟器/USB 真机）。"
+        "zh-CN": "GLM狐狸娘 · QQ/微信人格机器人：人格库热切换（聊天内管理员指令 + 后台指令）、长期记忆、关系画像、表情包库、黑白名单、拟人防风控、主动聊天。QQ 走 NapCat 协议，微信走 ADB（模拟器/USB 真机）。"
       },
       "category": "other"
     }
