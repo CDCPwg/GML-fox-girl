@@ -68,12 +68,14 @@ def start_embed_server(port=3977):
     return srv
 
 
-def start_fake_napcat(port=3999):
+def start_fake_napcat(port=3999, record=None):
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     class H(BaseHTTPRequestHandler):
         def do_POST(self):
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if record is not None:
+                record.append(self.path)
             out = b'{"status":"ok","retcode":0,"data":null}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -478,7 +480,7 @@ def main():
     check("hook 首次输出速览并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
           and "自动交接" in r1.stdout.decode("utf-8", "replace")
           and (cfgj.get("session") or {}).get("turns") == 0
-          and cfgj.get("intro", {}).get("version") == 8, cfgj.get("session"))
+          and cfgj.get("intro", {}).get("version") == 9, cfgj.get("session"))
     check("hook 二次静默", r2.stdout.decode("utf-8", "replace").strip() == "", r2.stdout)
 
     print("[v0.12] 管理守卫 / 95%提醒 / 远程交接")
@@ -596,8 +598,14 @@ def main():
     print("[v0.15] chunked 上报兼容 / 登录托管")
     coll2 = tempfile.mkdtemp(prefix="persona_chunk_")
     with open(os.path.join(coll2, "config.json"), "w", encoding="utf-8") as f:
-        json.dump({"collector": {"port": 3995}}, f)
+        json.dump({"collector": {"port": 3995},
+                   "qq": {"enabled": True, "napcat_base_url": "http://127.0.0.1:3996",
+                          "webui_url": "", "webui_token": ""},
+                   "admin": {"qq": ["3005"]},
+                   "alerts": {"enabled": True, "poll_seconds": 30}}, f)
     env3 = dict(os.environ, PERSONA_BOT_DATA_DIR=coll2, PYTHONIOENCODING="utf-8")
+    naplog = []
+    nap2 = start_fake_napcat(3996, record=naplog)
     coll = subprocess.Popen([sys.executable, SERVER, "--collector"], env=env3,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(30):
@@ -652,6 +660,9 @@ def main():
         pend = db2.execute(
             "SELECT COUNT(*) FROM messages WHERE msg_type!='blocked' AND processed=0").fetchone()[0]
         check("被拦截内容不进待处理队列", pend == 1, pend)  # 仅早前的分块正常消息
+        time.sleep(1.0)
+        alerts = [p for p in naplog if p == "/send_private_msg"]
+        check("防火墙拦截即时告警直发管理员", len(alerts) >= 1, naplog)
         db2.close()
     finally:
         coll.terminate()
@@ -659,6 +670,7 @@ def main():
             coll.wait(timeout=5)
         except Exception:
             coll.kill()
+        nap2.shutdown()
 
     data, _ = c.tool("save_qq_credentials", {"uin": "2139214603", "password": "S3cret!密码"})
     check("账密托管成功", data.get("ok") and data.get("uin") == "2139214603", data)

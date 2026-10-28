@@ -2,7 +2,7 @@
 import json
 import os
 
-VERSION = "0.16.0"
+VERSION = "0.17.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "stickers": {"auto_collect": True},
     "wechat": {"enabled": False, "adb_path": "adb", "device_serial": "", "input_tap_x": 0,
                "input_tap_y": 0, "human_trace": True},
+    "alerts": {"enabled": False, "poll_seconds": 30},
     "link": {"similar_threshold": 0.6, "expire_min": 15},
     "collector": {"host": "127.0.0.1", "port": 3001, "token": ""},
 }

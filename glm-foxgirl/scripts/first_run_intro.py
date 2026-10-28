@@ -12,7 +12,7 @@ from datetime import datetime
 DATA = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 CFG = os.path.join(DATA, "config.json")
 
-GUIDE_VERSION = 8
+GUIDE_VERSION = 9
 
 GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 
@@ -42,10 +42,11 @@ GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 - 说"关联微信 <微信号>"发起 → 把 6 位确认码私下转给对方 → 对方在微信发"关联确认 <码>"（15 分钟内有效）
 
 ━━【默认关闭 · 需你知情开启】（说一句即开，绝不代开）━━
-- 15分钟消息心跳：定时自动收发消息 → 说"开启15分钟心跳"，关闭说"关闭心跳"
+- 15分钟消息心跳：定时自动收发消息 → 说"开启15分钟心跳"（间隔 1~15 分钟任选，如"开启1分钟心跳"更实时但消耗更多；关闭说"关闭心跳"）
 - 主动聊天：机器人自己找人搭话 → proactive.enabled true（有每日上限与安静时段保护）
 - 语义向量记忆：调用 embedding API 处理记忆 → 提供地址与密钥即可配好
 - 自动重开新页：自动交接后自动建恢复页定时任务 → limits.auto_reopen true
+- 即时系统告警（非模型调用，零消耗）：防火墙拦截/掉线恢复实时通知管理员 → alerts.enabled true
 
 ━━ 日常可调（在聊天区说即可）━━
 - 防风控：回复延迟 humanize.reply_delay_min_ms/max_ms、每小时限频 max_per_chat_per_hour、安静时段 proactive.quiet_hours

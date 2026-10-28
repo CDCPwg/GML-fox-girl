@@ -120,6 +120,12 @@ def store_inbound(ev):
                     (chat_type, chat_id, contact_id, display, text, db.now_str()))
                 db.CONN.commit()
             access._guard_hit("qq", contact_id, "malicious:" + "/".join(scan["categories"]))
+            count = db.CONN.execute("SELECT count FROM guard WHERE channel='qq' AND contact_id=?",
+                                    (contact_id,)).fetchone()
+            if config.load_config().get("alerts", {}).get("enabled"):
+                _notify_admins(f"[防火墙拦截] {display or contact_id} 触发 "
+                               f"{'/'.join(scan['categories'])}（第 {count[0] if count else '?'} 次）"
+                               + ("，已自动拉黑" if (count and int(count[0]) > 10) else ""))
             return
     msg_type = "text" if types and set(types) <= {"text", "at", "face"} else ("image" if "image" in types and not text else "mixed")
     with db.LOCK:
@@ -195,6 +201,8 @@ def start_collector_thread():
         COLLECTOR_SERVER = ThreadingHTTPServer((host, port), EventHandler)
         t = threading.Thread(target=COLLECTOR_SERVER.serve_forever, daemon=True)
         t.start()
+        w = threading.Thread(target=_watchdog_loop, daemon=True)
+        w.start()
         print(f"[glm-foxgirl] collector listening on http://{host}:{port}/onebot/event", file=sys.stderr)
     except OSError:
         print(f"[glm-foxgirl] port {port} busy, assuming an external collector is running", file=sys.stderr)
@@ -384,6 +392,56 @@ def _webui_login_state(credential):
     login = _dig(resp, "data", "login") or _dig(resp, "data", "online") or resp.get("login")
     uin = _dig(resp, "data", "uin") or resp.get("uin")
     return bool(login), uin
+
+
+def _notify_admins(text):
+    """即时系统告警：罐装文本直发全部管理员（不经大脑、无 LLM 调用、绕过拟人延迟）。
+    alerts.enabled=false 时不发。任何失败静默留痕。"""
+    if not config.load_config().get("alerts", {}).get("enabled"):
+        return
+    for admin in access._admin_set("qq"):
+        try:
+            napcat_post("send_private_msg", {
+                "user_id": int(admin),
+                "message": [{"type": "text", "data": {"text": text}}]})
+            with db.LOCK:
+                db.CONN.execute(
+                    "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, msg_type,"
+                    " content, out_kind, processed, created_at)"
+                    " VALUES('out','qq','private',?,?,'alert',?,'alert',1,?)",
+                    (str(admin), str(admin), text, db.now_str()))
+                db.CONN.commit()
+        except Exception as e:
+            log_error("alert notify failed", e)
+
+
+WATCH = {"last_state": None}
+
+
+def _watchdog_loop():
+    """collector 进程内的实时看门狗：探测 NapCat 掉线/恢复并即时告警（规则层，无 LLM）。"""
+    while True:
+        try:
+            cfg = config.load_config()
+            if cfg.get("alerts", {}).get("enabled") and cfg.get("qq", {}).get("enabled"):
+                try:
+                    napcat_post("get_login_info", {})
+                    state = "online"
+                except Exception:
+                    state = "offline"
+                last = WATCH.get("last_state")
+                if last is not None and state != last:
+                    if state == "online":
+                        _notify_admins("[系统告警] NapCat/QQ 已恢复在线。")
+                    else:
+                        log_error("watchdog", "NapCat/QQ 掉线（恢复后将补发告警）")
+                WATCH["last_state"] = state
+        except Exception:
+            pass
+        try:
+            time.sleep(max(10, int(config.load_config().get("alerts", {}).get("poll_seconds", 30))))
+        except Exception:
+            time.sleep(30)
 
 
 def t_save_qq_credentials(uin, password, **_):

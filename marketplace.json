@@ -4,7 +4,7 @@
     {
       "name": "glm-foxgirl",
       "source": "./glm-foxgirl",
-      "version": "0.16.0",
+      "version": "0.17.0",
       "description": "GLM Foxgirl persona companion bot for QQ and WeChat: ZCode acts as the brain; NapCat carries QQ traffic; ADB drives WeChat on an emulator or USB phone. Persona library with hot-switching commands, semantic vector memory, video frame understanding, sticker auto-collection, poke interactions, SQLite long-term memory, relationship profiles, blacklist/whitelist, human-like rate limiting, proactive chat, scheduled heartbeat.",
       "displayName": "GLM狐狸娘",
       "displayName_i18n": {
