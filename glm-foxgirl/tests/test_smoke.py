@@ -144,7 +144,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 43 个工具", len(tools) == 43, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 46 个工具", len(tools) == 46, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -478,7 +478,7 @@ def main():
     check("hook 首次输出速览并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
           and "自动交接" in r1.stdout.decode("utf-8", "replace")
           and (cfgj.get("session") or {}).get("turns") == 0
-          and cfgj.get("intro", {}).get("version") == 6, cfgj.get("session"))
+          and cfgj.get("intro", {}).get("version") == 7, cfgj.get("session"))
     check("hook 二次静默", r2.stdout.decode("utf-8", "replace").strip() == "", r2.stdout)
 
     print("[v0.12] 管理守卫 / 95%提醒 / 远程交接")
@@ -592,6 +592,73 @@ def main():
                                       "include_superseded": True})
     old = next((m for m in data.get("memories", []) if m["id"] == aid), None)
     check("旧记忆保留可追溯", bool(old) and old.get("superseded_by") == bid, data)
+
+    print("[v0.15] chunked 上报兼容 / 登录托管")
+    coll2 = tempfile.mkdtemp(prefix="persona_chunk_")
+    with open(os.path.join(coll2, "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"collector": {"port": 3995}}, f)
+    env3 = dict(os.environ, PERSONA_BOT_DATA_DIR=coll2, PYTHONIOENCODING="utf-8")
+    coll = subprocess.Popen([sys.executable, SERVER, "--collector"], env=env3,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(30):
+        try:
+            with socket.create_connection(("127.0.0.1", 3995), timeout=0.3):
+                break
+        except OSError:
+            time.sleep(0.3)
+
+    def raw_chunked_post(payload_bytes, chunk_size=5, bad=False):
+        body = b""
+        if bad:
+            body = b"ZZZ\r\n" + payload_bytes + b"\r\n0\r\n\r\n"
+        else:
+            for i in range(0, len(payload_bytes), chunk_size):
+                part = payload_bytes[i:i + chunk_size]
+                body += hex(len(part))[2:].encode() + b"\r\n" + part + b"\r\n"
+            body += b"0\r\nX-Glm: 1\r\n\r\n"
+        req = (b"POST /onebot/event HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+               b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n" + body)
+        s = socket.create_connection(("127.0.0.1", 3995), timeout=5)
+        s.sendall(req)
+        resp = s.recv(4096)
+        s.close()
+        return resp
+
+    try:
+        ev = {"post_type": "message", "message_type": "private", "user_id": 3001,
+              "sender": {"nickname": "小明"}, "message": [{"type": "text", "data": {"text": "分块上报测试"}}]}
+        resp = raw_chunked_post(json.dumps(ev).encode("utf-8"))
+        time.sleep(0.8)
+        db2 = sqlite3.connect(os.path.join(coll2, "persona.db"))
+        rows = db2.execute("SELECT content FROM messages WHERE contact_id='3001'").fetchall()
+        check("chunked 上报多块+trailer 入库", b"204" in resp and len(rows) == 1
+              and "分块上报测试" in rows[0][0], (resp[:40], rows))
+        resp = raw_chunked_post(b'{"broken": true}', bad=True)
+        time.sleep(0.5)
+        rows = db2.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        check("非法块行容错（204 且不崩溃）", b"204" in resp and rows == 1, (resp[:40], rows))
+        db2.close()
+    finally:
+        coll.terminate()
+        try:
+            coll.wait(timeout=5)
+        except Exception:
+            coll.kill()
+
+    data, _ = c.tool("save_qq_credentials", {"uin": "2139214603", "password": "S3cret!密码"})
+    check("账密托管成功", data.get("ok") and data.get("uin") == "2139214603", data)
+    with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
+        cfg_raw = f.read()
+    check("密码已加密不落明文", "S3cret!密码" not in cfg_raw and "enc_password" in cfg_raw, None)
+    c.tool("configure_channel", {"channel": "qq", "enabled": False})
+    data, _ = c.tool("qq_login_status", {})
+    check("登录状态探测（渠道未启用时明确）", data.get("state") == "unknown", data)
+    c.tool("configure_channel", {"channel": "qq", "enabled": True})
+    data, _ = c.tool("qq_login_status", {})
+    check("渠道启用但不可达 → offline", data.get("state") == "offline", data)
+    data, _ = c.tool("qq_relogin", {})
+    check("备用登录未配 WebUI 时给出手动指引", data.get("state") == "need_manual"
+          and data.get("credentials_stored") is True, data)
 
     c.close()
     time.sleep(1.0)

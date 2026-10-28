@@ -96,6 +96,7 @@ def init_db():
     os.makedirs(config.MEDIA_DIR, exist_ok=True)
     CONN = sqlite3.connect(config.DB_PATH, check_same_thread=False)
     CONN.row_factory = sqlite3.Row
+    CONN.execute("PRAGMA busy_timeout=5000")  # 多 collector 进程并存时避免立即 SQLITE_BUSY
     with LOCK:
         CONN.executescript(SCHEMA)
         _migrate()

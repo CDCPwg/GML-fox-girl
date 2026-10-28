@@ -1,6 +1,6 @@
 # glm-foxgirl · GLM狐狸娘（QQ/微信人格伴侣）
 
-让 ZCode 作为"大脑"，以自定义人格在 QQ 和微信里与真人互动：**配置页/聊天区分工**（首次对话只做设置，聊天另起新页）、**自动交接**（上下文约 95% 自动提醒交接换新页，记忆外置无损）、**QQ/微信远程交接指令**、**管理守卫名单**（配置修改仅限管理员，超 10 次尝试自动拉黑）、记录检索与导出、被动回复（定时心跳，默认关闭知情开启）+ 主动聊天、无障碍读屏精确识别每个发言人（通知补捞）、识别图片/表情包/视频（抽帧）、长期记忆（语义检索 + 遗忘曲线 + 情绪效价 + 记忆图）与关系画像、心情状态层、黑白名单权限、拟人化防风控（含 ADB 轨迹随机化）、**人格库热切换**、SillyTavern 角色卡导入、**QQ/WX 账号关联器**（两侧验证码确认，画像继承/合并/冲突自选，记忆按身份组互联）、**反思机制**（定期把记忆合成高层洞察写回画像）、**记忆冲突消解**（新事实自动取代旧事实，保留可追溯）、表情包自动收集、戳一戳、发送队列掉线补发、本地 WebUI 控制台。
+让 ZCode 作为"大脑"，以自定义人格在 QQ 和微信里与真人互动：**配置页/聊天区分工**（首次对话只做设置，聊天另起新页）、**自动交接**（上下文约 95% 自动提醒交接换新页，记忆外置无损）、**QQ/微信远程交接指令**、**管理守卫名单**（配置修改仅限管理员，超 10 次尝试自动拉黑）、记录检索与导出、被动回复（定时心跳，默认关闭知情开启）+ 主动聊天、无障碍读屏精确识别每个发言人（通知补捞）、识别图片/表情包/视频（抽帧）、长期记忆（语义检索 + 遗忘曲线 + 情绪效价 + 记忆图）与关系画像、心情状态层、黑白名单权限、拟人化防风控（含 ADB 轨迹随机化）、**人格库热切换**、SillyTavern 角色卡导入、**QQ/WX 账号关联器**（两侧验证码确认，画像继承/合并/冲突自选，记忆按身份组互联）、**反思机制**（定期把记忆合成高层洞察写回画像）、**记忆冲突消解**（新事实自动取代旧事实，保留可追溯）、**NapCat 掉线自动恢复**（登录状态探测 + WebUI 快速登录 + 可选的 DPAPI 加密账密托管）、表情包自动收集、戳一戳、发送队列掉线补发、本地 WebUI 控制台。
 
 ## 设计原则
 
@@ -27,8 +27,9 @@
 
 | 路径 | 作用 |
 |---|---|
-| `server/persona_mcp.py` | MCP 入口与工具注册表（43 个工具）；实现按领域拆在 `server/foxbot/` 包（config/db/embeddings/access/identity/memory/graph/stickers/qq/wechat/persona/session/webui） |
+| `server/persona_mcp.py` | MCP 入口与工具注册表（46 个工具）；实现按领域拆在 `server/foxbot/` 包（config/db/embeddings/access/identity/memory/graph/stickers/qq/wechat/persona/session/webui/httpio/crypto） |
 | `server/foxbot/memory.py` | 记忆核心：遗忘曲线、语义检索、冲突消解（supersedes）、反思机制（reflect_due/material） |
+| `server/foxbot/qq.py` | NapCat 收发 + 事件收集器（**兼容 chunked 上报**）+ 掉线探测与备用登录 |
 | `commands/persona-handover` | `/persona-handover` 会话接力：总结存档后安全换新对话页（记忆外置无损） |
 | `commands/persona-finish-setup` | `/persona-finish-setup` 封存配置页，引导新开聊天区 |
 | `hooks/hooks.json` + `scripts/first_run_intro.py` | 首次对话功能提示（列出可修改功能与知情开启项，只出现一次） |

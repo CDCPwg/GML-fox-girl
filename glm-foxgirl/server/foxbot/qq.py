@@ -12,6 +12,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import access, config, db
+from .httpio import log_error, read_body
 
 
 def napcat_post(action, params):
@@ -146,8 +147,7 @@ class EventHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length)
+        body = read_body(self)  # NapCat 上报走 chunked（无 Content-Length），必须分块读取
         token = config.load_config()["collector"].get("token", "")
         if token:
             auth = self.headers.get("Authorization", "")
@@ -162,8 +162,8 @@ class EventHandler(BaseHTTPRequestHandler):
             elif ev.get("post_type") == "notice" and (
                     ev.get("sub_type") == "poke" or "poke" in str(ev.get("notice_type", ""))):
                 store_poke(ev)
-        except Exception:
-            pass
+        except Exception as e:
+            log_error("collector event parse/store error", e)
         self.send_response(204)
         self.end_headers()
 
@@ -311,3 +311,136 @@ def t_poke_qq(group_id, user_id, **_):
             (str(group_id), str(user_id), db.now_str()))
         db.CONN.commit()
     return {"sent": True, "napcat_status": resp.get("status")}
+
+
+# ---------------------------------------------------------------- 登录托管与备用登录
+
+def _webui_request(path, payload=None, credential=None, timeout=8):
+    """NapCat WebUI API（尽力而为）：未配置返回 None，任何失败返回 None。"""
+    base = (config.load_config()["qq"].get("webui_url") or "").rstrip("/")
+    if not base:
+        return None
+    headers = {"Content-Type": "application/json"}
+    if credential:
+        headers["Authorization"] = "Bearer " + credential
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(base + path, data=data, headers=headers,
+                                 method="POST" if data is not None else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _webui_credential():
+    token = config.load_config()["qq"].get("webui_token", "")
+    if not token:
+        return None
+    resp = _webui_request("/api/auth/login", {"token": token})
+    if not resp:
+        return None
+    data = resp.get("data") if isinstance(resp, dict) else {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if "credential" in k.lower() and isinstance(v, str):
+                return v
+    return None
+
+
+def _dig(obj, *keys):
+    node = obj
+    for k in keys:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(k)
+    return node
+
+
+def _webui_login_state(credential):
+    resp = _webui_request("/api/QQLogin/CheckLoginStatus", credential=credential)
+    if resp is None:
+        resp = _webui_request("/api/auth/login-info", credential=credential)
+    if resp is None:
+        return None
+    login = _dig(resp, "data", "login") or _dig(resp, "data", "online") or resp.get("login")
+    uin = _dig(resp, "data", "uin") or resp.get("uin")
+    return bool(login), uin
+
+
+def t_save_qq_credentials(uin, password, **_):
+    """托管 QQ 账号密码（备用登录用）：密码经 Windows DPAPI 加密后落盘，
+    本机本用户之外不可解密，任何接口都不会回显明文。可选功能。"""
+    if not uin or not password:
+        raise ValueError("uin 与 password 都不能为空")
+    from .crypto import dpapi_protect
+    enc = dpapi_protect(str(password))
+    cfg = config.load_config()
+    cfg.setdefault("qq", {})["credentials"] = {
+        "uin": str(uin), "enc_password": enc, "saved_at": db.now_str()}
+    config.save_config(cfg)
+    return {"ok": True, "uin": str(uin),
+            "hint": "密码已用 Windows DPAPI 加密托管（本机本用户才可解密，接口永不回显明文）。"
+                    "掉线时将自动尝试快速登录；快速登录失败仍需在 NapCat 登录窗口手动验证（如扫码）。"}
+
+
+def t_qq_login_status(**_):
+    """QQ 登录状态探测：渠道未启用→unknown；先打 OneBot get_login_info；
+    不可达再用 WebUI 区分 NapCat 宕机与掉线。"""
+    cfg = config.load_config()["qq"]
+    if not cfg.get("enabled"):
+        return {"state": "unknown", "reason": "QQ 渠道未启用",
+                "hint": "configure_channel 启用后再查"}
+    try:
+        resp = napcat_post("get_login_info", {})
+        data = resp.get("data") or {}
+        return {"state": "logged_in", "uin": str(data.get("user_id") or ""),
+                "nickname": data.get("nickname", "")}
+    except RuntimeError as e:
+        if "未启用" in str(e):
+            return {"state": "unknown", "reason": "QQ 渠道未启用",
+                    "hint": "configure_channel 启用后再查"}
+        credential = _webui_credential()
+        webui_resp = _webui_login_state(credential) if credential else None
+        if webui_resp is None:
+            return {"state": "napcat_down",
+                    "reason": "OneBot 不可达且 WebUI 未配置/不可达",
+                    "hint": "检查 NapCat 进程；配置 qq.webui_url + qq.webui_token 后可自动区分离线状态"}
+        login, uin = webui_resp
+        if login:
+            return {"state": "logged_in", "uin": str(uin or "")}
+        return {"state": "offline", "uin": str(uin or ""),
+                "hint": "NapCat 在线但 QQ 未登录：可调 qq_relogin 尝试快速登录"}
+    except Exception as e:
+        return {"state": "offline", "reason": str(e)[:120],
+                "hint": "调用失败，可调 qq_relogin 尝试恢复"}
+
+
+def t_qq_relogin(**_):
+    """备用登录：快速登录优先（无需密码）；失败时提示手动验证。
+    账号密码已加密托管时自动尝试快速登录并在提醒中注明；任何情况下不回显密码。"""
+    creds = config.load_config()["qq"].get("credentials") or {}
+    uin = str(creds.get("uin", ""))
+    credential = _webui_credential()
+    if credential:
+        if uin:
+            _webui_request("/api/QQLogin/SetQQLogin", {"uin": uin}, credential=credential)
+        else:
+            _webui_request("/api/QQLogin/SetQQLogin", {}, credential=credential)
+        for _ in range(3):
+            time.sleep(2)
+            state = _webui_login_state(credential)
+            if state and state[0]:
+                return {"ok": True, "state": "logged_in", "method": "webui-quick-login",
+                        "uin": str(state[1] or uin or "")}
+    if not credential:
+        return {"ok": False, "state": "need_manual",
+                "credentials_stored": bool(creds.get("enc_password")),
+                "hint": "WebUI 未配置（qq.webui_url / qq.webui_token），无法自动快速登录。"
+                        "请打开 NapCat 登录窗口手动登录（扫码或输入密码），"
+                        "或在配置页提供 WebUI 地址与 token 以启用自动快速登录。"}
+    return {"ok": False, "state": "need_manual",
+            "credentials_stored": bool(creds.get("enc_password")),
+            "hint": ("快速登录未成功。账号密码已加密托管，但 NapCat/NTQQ 不提供远程密码登录接口——"
+                     "请在 NapCat 登录窗口手动输入（或扫码）。已设置 webui.json 的 autoLoginAccount 时"
+                     "重启会自动快速登录（NapCatWinBootMain.exe 需传真实QQ号）。")}

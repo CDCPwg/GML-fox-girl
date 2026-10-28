@@ -2,14 +2,15 @@
 import json
 import os
 
-VERSION = "0.14.1"
+VERSION = "0.15.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 MEDIA_DIR = os.path.join(DATA_DIR, "media")
 
 DEFAULT_CONFIG = {
-    "qq": {"enabled": False, "napcat_base_url": "http://127.0.0.1:3000", "napcat_token": ""},
+    "qq": {"enabled": False, "napcat_base_url": "http://127.0.0.1:3000", "napcat_token": "",
+           "webui_url": "http://127.0.0.1:6099", "webui_token": "", "credentials": {}},
     "humanize": {"reply_delay_min_ms": 1200, "reply_delay_max_ms": 6000,
                  "max_per_chat_per_hour": 12, "outbox_ttl_min": 30},
     "proactive": {"enabled": False, "quiet_hours": "23:30-07:30", "max_per_day": 5,

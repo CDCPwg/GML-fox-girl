@@ -21,7 +21,8 @@ from foxbot.memory import (t_memory_conflicts, t_prune_memory, t_query_memory,
                            t_reflect_due, t_reflect_material, t_store_memory)
 from foxbot.persona import (t_bot_command, t_import_sillytavern, t_manage_mood,
                             t_manage_persona, t_manage_rules)
-from foxbot.qq import t_flush_outbox, t_poke_qq, t_send_qq_message
+from foxbot.qq import (t_flush_outbox, t_poke_qq, t_qq_login_status, t_qq_relogin,
+                       t_save_qq_credentials, t_send_qq_message)
 from foxbot.session import (t_bot_status, t_check_access, t_configure_channel,
                             t_export_transcript, t_get_config, t_get_pending_messages,
                             t_get_stats, t_mark_processed, t_proactive_due,
@@ -77,6 +78,9 @@ TOOLS = {
     "check_admin": (t_check_admin, "管理员判定：该渠道联系人是否在 admin.qq/admin.wechat 名单。所有配置/功能修改请求前必须调用。", {"type": "object", "properties": {"channel": {"type": "string"}, "contact_id": {"type": "string"}}, "required": ["channel", "contact_id"]}),
     "report_guard": (t_report_guard, "管理守卫：记录一次非管理员的配置/功能修改尝试（拒绝执行后调用）；单账号超过 10 次自动加入黑名单，之后其消息不再回复。bot_command 的指令类尝试已自动计数。", {"type": "object", "properties": {"channel": {"type": "string"}, "contact_id": {"type": "string"}, "action": {"type": "string"}}, "required": ["channel", "contact_id"]}),
     "link_accounts": (t_link_accounts, "QQ/WX 账号关联器：action=request 发起关联（生成6位确认码，私下转达对方）；对方在自己平台用本人账号发'关联确认 <码>'→ action=confirm；画像自动调和（单侧继承/相似合并/不相似返回 conflict 由该账号选 a/b/merge 后 action=resolve）；记忆按身份组互联检索。action=ids 展开身份组（查画像/记忆前先调）；status 查看；unlink 解除。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["request", "confirm", "resolve", "status", "ids", "unlink"]}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "peer_channel": {"type": "string"}, "peer_contact_id": {"type": "string"}, "code": {"type": "string"}, "request_id": {"type": "number"}, "choice": {"type": "string", "enum": ["a", "b", "merge"]}}, "required": ["action"]}),
+    "save_qq_credentials": (t_save_qq_credentials, "托管 QQ 账号密码（可选的备用登录方案）：密码经 Windows DPAPI 加密后落盘（本机本用户才可解密），接口永不回显明文。掉线时自动尝试快速登录；快速登录失败仍需手动验证。", {"type": "object", "properties": {"uin": {"type": "string"}, "password": {"type": "string"}}, "required": ["uin", "password"]}),
+    "qq_login_status": (t_qq_login_status, "QQ 登录状态探测：OneBot get_login_info 优先；不可达时用 WebUI（qq.webui_url/token）区分 NapCat 宕机与掉线。状态：logged_in/offline/napcat_down/unknown。", {"type": "object", "properties": {}}),
+    "qq_relogin": (t_qq_relogin, "备用登录：尝试 WebUI 快速登录恢复在线；失败返回 need_manual 与提醒话术（账密已加密托管但不回显）。心跳检测到掉线时调用。", {"type": "object", "properties": {}}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}

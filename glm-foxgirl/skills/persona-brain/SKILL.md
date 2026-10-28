@@ -20,7 +20,7 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 >
 > **自动交接与 95% 提醒**：每轮用户交互或心跳处理完调用 `session_progress()`，按轮数折算上下文占用估算百分比（ZCode 未向插件暴露真实值）。返回 level：`warn`（估算 ≥warn_pct，默认 85%）→ 用一句话提醒用户接近上限；`handover`（估算 ≥handover_pct，默认 95%）→ 立即执行交接：总结本会话 → `session_note(action=save)` → 提醒用户新开对话页；若 `limits.auto_reopen=true`（默认关，知情开启）则用 CronCreate 建一个 1 分钟后的一次性"恢复值机"任务自动开新页。新会话由 SessionStart hook 自动归零。管理员也可在 QQ/微信里直接发"交接"远程触发同一流程（bot_command handover）。
 
-1. `bot_status` 快检（首次会话必做；collector 未运行要提醒用户）。
+1. `bot_status` 快检（首次会话必做；collector 未运行要提醒用户）。QQ 渠道启用时若发送失败或怀疑掉线：`qq_login_status` → offline 就 `qq_relogin`（自动快速登录；失败且未托管账密则明确提醒用户重新登录 NapCat）。
 2. `get_pending_messages` 取未处理消息。每条消息已带发言人 display_name 和关系画像摘要。
 3. **逐条处理**，顺序执行 4-9。
 4. `check_access`（channel, chat_type, chat_id, contact_id）——黑名单命中或不在白名单：**直接跳过**，不回复、不记忆。

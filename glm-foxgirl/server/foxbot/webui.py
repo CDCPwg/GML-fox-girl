@@ -1,9 +1,10 @@
-"""本地 WebUI 控制台（--webui，仅绑定 127.0.0.1）。"""
+﻿"""本地 WebUI 控制台（--webui，仅绑定 127.0.0.1）。"""
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from . import config
+from .httpio import read_body
 from .memory import t_query_memory
 from .identity import t_manage_profile
 from .persona import t_manage_persona, t_manage_rules
@@ -126,26 +127,26 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
+            body = read_body(self)
+            payload = json.loads(body or b"{}")
             if self.path == "/api/persona/activate":
-                self._json(t_manage_persona(action="set_active", persona_id=body.get("persona_id")))
+                self._json(t_manage_persona(action="set_active", persona_id=payload.get("persona_id")))
             elif self.path == "/api/persona/update":
-                self._json(t_manage_persona(action="update", persona_id=body.get("persona_id"),
-                                            prompt=body.get("prompt"), style=body.get("style")))
+                self._json(t_manage_persona(action="update", persona_id=payload.get("persona_id"),
+                                            prompt=payload.get("prompt"), style=payload.get("style")))
             elif self.path == "/api/rules/add":
-                self._json(t_manage_rules(action="add", list_type=body.get("list_type"),
-                                          scope=body.get("scope", "contact"),
-                                          channel=body.get("channel", "*"),
-                                          target_id=body.get("target_id"), note=body.get("note", "")))
+                self._json(t_manage_rules(action="add", list_type=payload.get("list_type"),
+                                          scope=payload.get("scope", "contact"),
+                                          channel=payload.get("channel", "*"),
+                                          target_id=payload.get("target_id"), note=payload.get("note", "")))
             elif self.path == "/api/rules/remove":
-                self._json(t_manage_rules(action="remove", list_type=body.get("list_type"),
-                                          scope=body.get("scope"), channel=body.get("channel"),
-                                          target_id=body.get("target_id")))
+                self._json(t_manage_rules(action="remove", list_type=payload.get("list_type"),
+                                          scope=payload.get("scope"), channel=payload.get("channel"),
+                                          target_id=payload.get("target_id")))
             elif self.path == "/api/mood":
                 from .persona import t_manage_mood
-                self._json(t_manage_mood(action="set", mood=body.get("mood", 0),
-                                         reason=body.get("reason", "")))
+                self._json(t_manage_mood(action="set", mood=payload.get("mood", 0),
+                                         reason=payload.get("reason", "")))
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:
