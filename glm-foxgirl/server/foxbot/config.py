@@ -2,7 +2,7 @@
 import json
 import os
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -19,6 +19,8 @@ DEFAULT_CONFIG = {
     "memory": {"embed_base_url": "", "embed_api_key": "", "embed_model": "embedding-3",
                "half_life_days": 30},
     "mood": {"current": 0, "reason": ""},
+    "persona_lock": {"enabled": True},
+    "security": {"content_filter": True},
     "limits": {"auto_handover_turns": 40, "auto_handover_enabled": True,
                "warn_pct": 85, "handover_pct": 95, "auto_reopen": False},
     "video": {"ffmpeg_path": "ffmpeg"},

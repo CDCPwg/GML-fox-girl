@@ -12,7 +12,7 @@ from datetime import datetime
 DATA = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 CFG = os.path.join(DATA, "config.json")
 
-GUIDE_VERSION = 7
+GUIDE_VERSION = 8
 
 GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 
@@ -30,9 +30,11 @@ GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 - 备份分享：人格可导出/导入 JSON（存 ~/.persona-bot/personas/）
 
 ━━ 第三步 · 管理员与安全 ━━
-- 管理员：说"把我的QQ号 xxx 设为管理员"（admin.qq / admin.wechat）——聊天内指令与一切配置修改仅限名单账号
-- 管理守卫：非管理员试图修改会被拒绝并警告，单账号超过 10 次自动拉黑、不再回复
+- 管理员：说"把我的QQ号 xxx 设为管理员"（admin.qq / admin.wechat）——聊天内指令与一切配置修改仅限名单账号；本机信息与本机操作也只有管理员有权请求
+- 内容防火墙（默认开）：损伤本机或骗取本机信息/凭据的消息会被直接拦截（不进入大脑），向对方发出警告并计入守卫，单账号超 10 次自动拉黑；security.content_filter false 可关（不建议）
+- 管理守卫：非管理员试图修改配置会被拒绝并警告，单账号超过 10 次自动拉黑、不再回复
 - 黑白名单：说"把 xx 拉黑"或"只允许 xx 聊"（联系人/群/全局三种粒度）
+- 人格内容锁定（默认开）：QQ/微信渠道可切换人格表中现有人格，但内容（性格文本/增删）只能在工作台修改；确需放开说 set_config("persona_lock.enabled", false)
 - NapCat 掉线自动恢复（可选·强烈建议）：提供机器人小号的账号+密码——密码经 Windows DPAPI 加密托管（本机本用户才可解密，任何接口不回显明文）。掉线时自动尝试快速登录恢复；不提交账密也可以，掉线时会明确提醒你重新登录。说"托管QQ登录凭证 <QQ号> <密码>"即可
 
 ━━ 账号关联（可选）━━

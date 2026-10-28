@@ -28,6 +28,7 @@ from foxbot.session import (t_bot_status, t_check_access, t_configure_channel,
                             t_get_stats, t_mark_processed, t_proactive_due,
                             t_search_messages, t_session_note, t_session_progress,
                             t_set_config, t_simulate_inbound)
+from foxbot.security import t_recent_blocks
 from foxbot.stickers import (t_download_media, t_extract_video_frames,
                              t_manage_stickers, t_pick_sticker)
 from foxbot.wechat import (t_send_wechat_message, t_send_wechat_sticker,
@@ -81,6 +82,7 @@ TOOLS = {
     "save_qq_credentials": (t_save_qq_credentials, "托管 QQ 账号密码（可选的备用登录方案）：密码经 Windows DPAPI 加密后落盘（本机本用户才可解密），接口永不回显明文。掉线时自动尝试快速登录；快速登录失败仍需手动验证。", {"type": "object", "properties": {"uin": {"type": "string"}, "password": {"type": "string"}}, "required": ["uin", "password"]}),
     "qq_login_status": (t_qq_login_status, "QQ 登录状态探测：OneBot get_login_info 优先；不可达时用 WebUI（qq.webui_url/token）区分 NapCat 宕机与掉线。状态：logged_in/offline/napcat_down/unknown。", {"type": "object", "properties": {}}),
     "qq_relogin": (t_qq_relogin, "备用登录：尝试 WebUI 快速登录恢复在线；失败返回 need_manual 与提醒话术（账密已加密托管但不回显）。心跳检测到掉线时调用。", {"type": "object", "properties": {}}),
+    "recent_blocks": (t_recent_blocks, "内容防火墙拦截记录：被拦截的恶意内容仅元数据（不回传攻击原文，防二次注入）+ 守卫计数。管理员审查用。", {"type": "object", "properties": {"limit": {"type": "number", "default": 20}}}),
 }
 
 HANDLERS = {name: fn for name, (fn, _, _) in TOOLS.items()}

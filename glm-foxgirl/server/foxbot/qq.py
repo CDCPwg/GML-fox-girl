@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import access, config, db
+from . import access, config, db, security
 from .httpio import log_error, read_body
 
 
@@ -108,6 +108,19 @@ def store_inbound(ev):
         return
     if not text and ev.get("raw_message"):
         text = ev["raw_message"]
+    # 内容防火墙：恶意内容直接拦截为 blocked（永不进入大脑上下文），并计入守卫
+    if config.load_config().get("security", {}).get("content_filter", True):
+        scan = security.scan_content(text)
+        if scan["malicious"]:
+            with db.LOCK:
+                db.CONN.execute(
+                    "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, display_name,"
+                    " msg_type, content, media_url, media_json, processed, created_at)"
+                    " VALUES('in','qq',?,?,?,?,'blocked',?,'','',1,?)",
+                    (chat_type, chat_id, contact_id, display, text, db.now_str()))
+                db.CONN.commit()
+            access._guard_hit("qq", contact_id, "malicious:" + "/".join(scan["categories"]))
+            return
     msg_type = "text" if types and set(types) <= {"text", "at", "face"} else ("image" if "image" in types and not text else "mixed")
     with db.LOCK:
         db.CONN.execute(
@@ -201,6 +214,11 @@ def t_send_qq_message(chat_type, chat_id, text="", image_path=None, contact_id=N
         raise ValueError("chat_type 必须是 private 或 group")
     if not text and not image_path:
         raise ValueError("text 与 image_path 至少给一个")
+    if text and security.secret_leak(text):
+        from .httpio import log_error as _le
+        _le("outgoing blocked (secret leak guard)", f"chat={chat_id}")
+        return {"sent": False, "blocked": True,
+                "reason": "内容疑似包含本机敏感信息（token/密钥/凭据），已被内容防火墙拦截"}
     decision = access.access_decision("qq", chat_type, str(chat_id),
                                       str(contact_id) if contact_id else str(chat_id) if chat_type == "private" else None)
     if not decision["allowed"]:

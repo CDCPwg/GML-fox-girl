@@ -8,7 +8,7 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 
-from . import access, config, db
+from . import access, config, db, security
 
 
 def run_adb(args, timeout=30):
@@ -49,6 +49,9 @@ def _human_trace(serial):
 def t_send_wechat_message(text, **_):
     if not text:
         raise ValueError("text 不能为空")
+    if security.secret_leak(text):
+        return {"sent": False, "blocked": True,
+                "reason": "内容疑似包含本机敏感信息（token/密钥/凭据），已被内容防火墙拦截"}
     serial = resolve_device()
     ok, why = access.rate_limit_check("wechat", "active")
     if not ok:

@@ -7,7 +7,17 @@ import re
 from . import access, config, db
 
 
-def t_manage_persona(action, name=None, prompt=None, style=None, persona_id=None, file_path=None, **_):
+def t_manage_persona(action, name=None, prompt=None, style=None, persona_id=None, file_path=None,
+                     origin="workspace", **_):
+    """人格库管理。人格内容（prompt/style/增删）默认只能在工作台修改：
+    persona_lock 开启时，origin='chat'（来自 QQ/微信请求）的内容修改会被拒绝——
+    但切换（set_active）永远允许：回复性格始终以人格表现有内容为准。"""
+    if (action in ("create", "update", "delete", "import")
+            and config.load_config().get("persona_lock", {}).get("enabled", True)
+            and origin != "workspace"):
+        raise ValueError(
+            "人格内容已锁定：QQ/微信渠道不可修改人格内容（切换人格仍可）。"
+            "内容修改请在工作台执行（origin='workspace'）。")
     with db.LOCK:
         if action == "list":
             rows = [dict(r) for r in db.CONN.execute("SELECT * FROM personas ORDER BY is_active DESC, id")]
