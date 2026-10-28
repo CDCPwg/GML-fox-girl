@@ -148,6 +148,9 @@ def main():
         if "--port" in sys.argv:
             port = int(sys.argv[sys.argv.index("--port") + 1])
         webui.main_webui(port)
+    elif "--brain" in sys.argv or "--brain-once" in sys.argv:
+        from foxbot.brain import main_brain
+        main_brain(once="--brain-once" in sys.argv)
     elif "--collector" in sys.argv:
         cfg = config.load_config()["collector"]
         srv = webui.ThreadingHTTPServer((cfg.get("host", "127.0.0.1"), int(cfg.get("port", 3001))), qq.EventHandler)

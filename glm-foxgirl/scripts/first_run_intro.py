@@ -12,7 +12,7 @@ from datetime import datetime
 DATA = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 CFG = os.path.join(DATA, "config.json")
 
-GUIDE_VERSION = 9
+GUIDE_VERSION = 10
 
 GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 
@@ -47,6 +47,7 @@ GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 - 语义向量记忆：调用 embedding API 处理记忆 → 提供地址与密钥即可配好
 - 自动重开新页：自动交接后自动建恢复页定时任务 → limits.auto_reopen true
 - 即时系统告警（非模型调用，零消耗）：防火墙拦截/掉线恢复实时通知管理员 → alerts.enabled true
+- 实时大脑守护进程（准实时人格回复，秒级轮询 + 调用 LLM API，与心跳互斥二选一）→ 说"启用实时大脑"并提供 API 地址/密钥/模型；运行 python server/persona_mcp.py --brain
 
 ━━ 日常可调（在聊天区说即可）━━
 - 防风控：回复延迟 humanize.reply_delay_min_ms/max_ms、每小时限频 max_per_chat_per_hour、安静时段 proactive.quiet_hours

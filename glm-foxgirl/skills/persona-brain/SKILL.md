@@ -16,6 +16,8 @@ ZCode 关闭期间若需不丢消息，提醒用户保持运行：`python <插�
 
 > 心跳由定时任务触发。**定时任务默认不存在、必须由用户知情开启**（用户说"开启15分钟心跳"才创建，"关闭心跳"即删除），绝不代用户开启；间隔 1~15 分钟任选（越短人格回复越实时，模型消耗越大）。心跳结束调用 `flush_outbox` 补发掉线期间排队的消息，最后用一两句话汇报结果。系统级事件（防火墙拦截、掉线恢复）由 collector 的即时告警层直发管理员（alerts.enabled，无模型调用）——与此无关，不要代发。
 >
+> **与独立大脑互斥**：用户若启用了独立大脑守护进程（`python server/persona_mcp.py --brain`，brain.api_base 已配置），QQ 消息由它准实时处理——此时**必须关闭心跳自动化**，二选一，避免双脑重复回复。守护进程不处理的微信消息仍由本手册流程负责。
+>
 > **页面分工**：`bot_status.setup_completed=false` 时本会话是**配置页**——只做功能设置与开关，聊天请求引导先执行 /persona-finish-setup 再新开聊天区；`=true` 则本会话是聊天区/接力页，正常按本手册服务。
 >
 > **自动交接与 95% 提醒**：每轮用户交互或心跳处理完调用 `session_progress()`，按轮数折算上下文占用估算百分比（ZCode 未向插件暴露真实值）。返回 level：`warn`（估算 ≥warn_pct，默认 85%）→ 用一句话提醒用户接近上限；`handover`（估算 ≥handover_pct，默认 95%）→ 立即执行交接：总结本会话 → `session_note(action=save)` → 提醒用户新开对话页；若 `limits.auto_reopen=true`（默认关，知情开启）则用 CronCreate 建一个 1 分钟后的一次性"恢复值机"任务自动开新页。新会话由 SessionStart hook 自动归零。管理员也可在 QQ/微信里直接发"交接"远程触发同一流程（bot_command handover）。

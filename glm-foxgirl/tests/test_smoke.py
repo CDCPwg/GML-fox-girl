@@ -68,6 +68,30 @@ def start_embed_server(port=3977):
     return srv
 
 
+def start_fake_llm(port=3997, log=None):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n)
+            if log is not None:
+                log.append(body.decode("utf-8", "replace"))
+            out = '{"choices":[{"message":{"content":"在的呀"}}]}'.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 def start_fake_napcat(port=3999, record=None):
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -716,6 +740,60 @@ def main():
     data, _ = c.tool("bot_status")
     check("状态含锁定与拦截计数", data.get("persona_lock") is True
           and data["counts"].get("blocked", 0) >= 1, data)
+
+    print("[v0.18] 独立大脑守护进程")
+    llmlog = []
+    llm = start_fake_llm(3997, log=llmlog)
+    naplog2 = []
+    nap3 = start_fake_napcat(3998, record=naplog2)
+    c.tool("configure_channel", {"channel": "qq", "enabled": True,
+                                 "napcat_base_url": "http://127.0.0.1:3998"})
+    c.tool("set_config", {"key": "brain.api_base", "value": "http://127.0.0.1:3997"})
+    c.tool("set_config", {"key": "brain.api_key", "value": "test-key"})
+    c.tool("set_config", {"key": "brain.model", "value": "test-model"})
+    c.tool("set_config", {"key": "proactive.reply_probability_group", "value": 0})
+    data, _ = c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private",
+                                          "chat_id": "10001", "contact_id": "10001",
+                                          "display_name": "阿明", "text": "在吗"})
+    run = subprocess.run([sys.executable, SERVER, "--brain-once"],
+                         env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                         capture_output=True, timeout=120)
+    sent = [p for p in naplog2 if p == "/send_private_msg"]
+    check("私聊消息触发 LLM 并回复", len(llmlog) == 1 and len(sent) >= 1, (run.stderr[-200:], llmlog, naplog2))
+    check("人格上下文注入 LLM", llmlog and "阿玲" in llmlog[0], None)
+    conn = sqlite3.connect(os.path.join(tmp, "persona.db"))
+    proc = conn.execute("SELECT processed FROM messages WHERE contact_id='10001' AND direction='in'"
+                        " AND content='在吗'").fetchone()
+    conn.close()
+    check("消息已标记处理", bool(proc) and proc[0] == 1, proc)
+
+    c.tool("manage_rules", {"action": "add", "list_type": "blacklist", "channel": "qq",
+                            "scope": "contact", "target_id": "4001"})
+    c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private", "chat_id": "4001",
+                                "contact_id": "4001", "display_name": "X", "text": "黑名单消息"})
+    before = len(llmlog)
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    check("黑名单消息零 LLM 消耗", len(llmlog) == before, len(llmlog))
+
+    c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private", "chat_id": "10001",
+                                "contact_id": "10001", "display_name": "阿明", "text": "切换人格 小婉"})
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    data, _ = c.tool("manage_persona", {"action": "list"})
+    check("守护进程直执管理指令（零LLM）", data.get("active") == "小婉"
+          and len(llmlog) == before, (data.get("active"), len(llmlog)))
+
+    c.tool("simulate_inbound", {"channel": "qq", "chat_type": "group", "chat_id": "777",
+                                "contact_id": "10001", "display_name": "阿明", "text": "群里随便聊聊"})
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    check("群聊非点名按概率门控跳过", len(llmlog) == before, len(llmlog))
+    llm.shutdown()
+    nap3.shutdown()
 
     c.close()
     time.sleep(1.0)

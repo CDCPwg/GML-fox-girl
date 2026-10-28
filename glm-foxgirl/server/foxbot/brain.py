@@ -1,0 +1,197 @@
+"""独立大脑守护进程（可选）：实时轮询收件箱，规则预筛后仅对需要人格的消息调用 LLM。
+
+规则预筛（零成本）：黑白名单 → 聊天内管理指令 → 群聊回复必要性门控。
+人格上下文：人格表（现有人格）+ 关系画像（身份组）+ 相关记忆 + 记忆图 + 最近对话。
+与心跳自动化互斥：二选一，避免双脑重复回复。
+LLM 走 OpenAI 兼容 /chat/completions（brain.api_base/api_key/model，默认关闭）。
+"""
+import json
+import random
+import re
+import sys
+import time
+import urllib.request
+
+from . import access, config, db, graph, identity, qq
+from .memory import t_query_memory
+from .persona import t_bot_command
+
+
+def _llm_chat(system, user):
+    cfg = config.load_config()["brain"]
+    base = (cfg.get("api_base") or "").strip()
+    if not base:
+        raise RuntimeError("brain.api_base 未配置")
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("api_key"):
+        headers["Authorization"] = "Bearer " + cfg["api_key"]
+    body = {"model": cfg.get("model", ""), "temperature": 0.9, "max_tokens": 500,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}]}
+    req = urllib.request.Request(base.rstrip("/") + "/chat/completions",
+                                 data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                                 headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return (data["choices"][0]["message"]["content"] or "").strip()
+
+
+def _active_persona():
+    with db.LOCK:
+        row = db.CONN.execute("SELECT name, prompt, style FROM personas WHERE is_active=1").fetchone()
+    return dict(row) if row else None
+
+
+def _recent_chat(channel, chat_id, limit=10):
+    with db.LOCK:
+        rows = [dict(r) for r in db.CONN.execute(
+            "SELECT direction, display_name, content, created_at FROM messages"
+            " WHERE channel=? AND chat_id=? AND msg_type!='blocked' ORDER BY id DESC LIMIT ?",
+            (channel, str(chat_id), max(2, min(int(limit), 30))))]
+    return list(reversed(rows))
+
+
+def _mentioned(media_json, persona_name, text):
+    try:
+        for seg in json.loads(media_json or "[]"):
+            if seg.get("type") == "at":
+                return True
+    except Exception:
+        pass
+    return bool(persona_name and persona_name in (text or ""))
+
+
+def _build_context(msg, persona):
+    channel, contact_id, chat_id = msg["channel"], msg["contact_id"], msg["chat_id"]
+    prof = None
+    try:
+        ids = [i for _, i in identity._linked_ids(channel, contact_id)]
+        marks = ",".join("?" * len(ids))
+        with db.LOCK:
+            prows = [dict(r) for r in db.CONN.execute(
+                f"SELECT * FROM profiles WHERE contact_id IN ({marks})", ids)]
+        prof = prows[0] if prows else None
+    except Exception:
+        prof = None
+    mem = t_query_memory(contact_id=contact_id, channel=channel, limit=5).get("memories", [])
+    graph_hint = ""
+    try:
+        gq = graph.t_graph_query(entity=(msg.get("display_name") or ""), depth=1, limit=8)
+        if gq.get("found"):
+            graph_hint = "；".join(f"{e['src_name']}-{e['relation']}-{e['dst_name']}"
+                                   for e in gq["edges"][:6])
+    except Exception:
+        graph_hint = ""
+    recent = _recent_chat(channel, chat_id)
+    sys_prompt = (persona["prompt"] + ("\n\n说话风格：" + persona["style"] if persona["style"] else "")
+                  + "\n\n【你正在 QQ 上与人聊天】直接输出要发送的回复文本：一条、短句、口语、"
+                    "完全符合人格；不要解释、不要前缀引号、不要列表。如果这条消息不值得回复，只输出 [SKIP]。")
+    user_parts = [f"对方：{msg.get('display_name') or contact_id}（{chat_id}）"]
+    if prof:
+        user_parts.append(f"好感：{prof.get('affinity', 0)}｜印象：{prof.get('impression') or '（无）'}"
+                          f"｜相处方式：{prof.get('style_notes') or '（无）'}")
+    if mem:
+        user_parts.append("相关记忆：" + "；".join(m["content"][:60] for m in mem[:5]))
+    if graph_hint:
+        user_parts.append("关联事实：" + graph_hint)
+    if recent:
+        user_parts.append("最近对话：\n" + "\n".join(
+            f"{'我' if r['direction'] == 'out' else (r['display_name'] or '对方')}：{r['content'][:80]}"
+            for r in recent[-8:]))
+    user_parts.append(f"这条新消息：{msg.get('content') or '（媒体消息）'}")
+    return sys_prompt, "\n".join(user_parts)
+
+
+def _send_reply(msg, text):
+    if msg["channel"] == "qq":
+        return qq.t_send_qq_message(chat_type=msg["chat_type"], chat_id=msg["chat_id"],
+                                    text=text, contact_id=msg["contact_id"])
+    return {"sent": False, "reason": "独立大脑 v1 仅处理 QQ 渠道；微信消息留给工作台处理"}
+
+
+def brain_process_once(stats=None):
+    """单次处理轮：规则预筛 → LLM 人格回复 → 发送 → 收尾。返回统计。"""
+    stats = stats or {"seen": 0, "replied": 0, "skipped": 0, "blocked": 0, "commands": 0, "errors": 0}
+    cfg = config.load_config()
+    from .session import t_get_pending_messages, t_mark_processed
+    data = t_get_pending_messages(limit=30)
+    persona = _active_persona()
+    group_p = float(cfg.get("proactive", {}).get("reply_probability_group", 0.3))
+    for msg in data.get("messages", []):
+        stats["seen"] += 1
+        mid = msg["id"]
+        channel, chat_type, chat_id = msg["channel"], msg["chat_type"], msg["chat_id"]
+        contact_id = str(msg["contact_id"] or "")
+
+        def done():
+            t_mark_processed([mid])
+
+        decision = access.access_decision(channel, chat_type, chat_id, contact_id)
+        if not decision["allowed"]:
+            stats["blocked"] += 1
+            done()
+            continue
+        cmd = t_bot_command(text=msg.get("content") or "", channel=channel,
+                            contact_id=contact_id, chat_id=chat_id)
+        if cmd.get("handled"):
+            stats["commands"] += 1
+            if cmd.get("allowed") and cmd.get("reply"):
+                _send_reply(msg, cmd["reply"])
+            done()
+            continue
+        if channel != "qq":
+            stats["skipped"] += 1
+            continue  # 独立大脑 v1 只处理 QQ；微信留给工作台
+        if not persona:
+            stats["skipped"] += 1
+            done()
+            continue
+        if chat_type == "group":
+            mentioned = _mentioned(msg.get("media_json"), persona["name"], msg.get("content"))
+            if not mentioned and random.random() >= group_p:
+                stats["skipped"] += 1
+                done()
+                continue
+        if not (msg.get("content") or "").strip():
+            stats["skipped"] += 1
+            done()
+            continue
+        try:
+            system, user = _build_context(msg, persona)
+            reply = _llm_chat(system, user)
+            reply = re.sub(r"^['\"“”]+|['\"“”]+$", "", reply or "").strip()
+            if not reply or "[SKIP]" in reply:
+                stats["skipped"] += 1
+                done()
+                continue
+            sent = _send_reply(msg, reply)
+            if sent.get("sent"):
+                stats["replied"] += 1
+                done()
+            else:
+                stats["errors"] += 1  # 发送失败（限频/不可达）→ 不标记，留待下轮重试
+        except Exception as e:
+            stats["errors"] += 1
+            print(f"[glm-foxgirl] brain process error: {e}", file=sys.stderr)
+    return stats
+
+
+def main_brain(once=False):
+    cfg = config.load_config()["brain"]
+    if not (cfg.get("api_base") and cfg.get("model")):
+        print("[glm-foxgirl] 独立大脑未配置：需 set_config brain.api_base / brain.api_key / brain.model "
+              "（OpenAI 兼容接口）。注意：与心跳自动化互斥，二选一。", file=sys.stderr)
+        sys.exit(2)
+    db.init_db()
+    qq.start_collector_thread()
+    print(f"[glm-foxgirl] 独立大脑运行中：model={cfg['model']} poll={cfg.get('poll_seconds', 5)}s"
+          f"（实时人格回复；与心跳自动化互斥，勿同时开启）", file=sys.stderr)
+    if once:
+        print(json.dumps(brain_process_once(), ensure_ascii=False), file=sys.stderr)
+        return
+    while True:
+        try:
+            brain_process_once()
+        except Exception as e:
+            print(f"[glm-foxgirl] brain loop error: {e}", file=sys.stderr)
+        time.sleep(max(2, int(cfg.get("poll_seconds", 5))))
