@@ -26,4 +26,4 @@
 
 - 数据（人格/记忆/画像/记录/笔记）：`~/.persona-bot/`（备份即备份一切）
 - 插件源码：`D:\z code shuju\chajianku\pebanchajian\glm-foxgirl`
-- 测试：`python glm-foxgirl\tests\test_smoke.py`（当前应 110/110）
+- 测试：`python glm-foxgirl\tests\test_smoke.py`（当前应 112/112；未装 ffmpeg 时自动跳过视频抽帧项）

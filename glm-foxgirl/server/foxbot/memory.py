@@ -9,7 +9,7 @@ from .embeddings import embed_text, _cosine
 
 def _memory_score(row, now_ts, half_life_days):
     """重要级+情绪强度，随时间指数衰减（遗忘曲线）：强情绪记忆衰减更慢。"""
-    age_days = max(0.0, (db._parse_dt(row["created_at"])) / 86400.0)
+    age_days = max(0.0, (now_ts - db._parse_dt(row["created_at"])) / 86400.0)
     decay = 0.5 ** (age_days / max(1.0, float(half_life_days)))
     return (int(row["importance"]) + abs(int(row.get("emotion") or 0))) * decay
 

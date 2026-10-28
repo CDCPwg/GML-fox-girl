@@ -12,14 +12,14 @@ hooks/                    首次对话功能提示（SessionStart）
 skills/                   persona-brain 大脑手册 / qq-napcat-setup / wechat-adb-setup
 commands/                 /persona-bot、/persona-switch（热切换）、/persona-create（问答生成人设）
 assets/personas/          GLM娘初始人设（scripts/install_default_persona.py 安装进人格库）
-tests/test_smoke.py       端到端烟雾测试（110 项，纯标准库）
+tests/test_smoke.py       端到端烟雾测试（112 项，纯标准库；无 ffmpeg 时自动跳过视频抽帧项）
 workspace/                专用驾驶舱工作区（AGENTS.md：配置页/聊天区分工 + 开机恢复值机）
 ```
 
 ## 日常迭代流程
 
 1. 直接修改 `glm-foxgirl/` 下的源码。
-2. 跑测试确认：`python glm-foxgirl\tests\test_smoke.py`（应 110/110）。
+2. 跑测试确认：`python glm-foxgirl\tests\test_smoke.py`（应 112/112；未装 ffmpeg 时自动跳过视频抽帧项，其余照跑）。
 3. 在 `glm-foxgirl/.zcode-plugin/plugin.json` 里**递增语义化版本**，并同步 `marketplace.json` 里该插件的 `version`。
 4. 提交：`git add -A && git commit -m "feat: ..."`（便携 git 在 `D:\z code shuju\tools\MinGit\cmd\git.exe`）。
 5. 在 ZCode 里：**插件市场 → 齿轮 → 市场源 → 刷新该市场**，再到 **个人 → 插件 → 更新**。

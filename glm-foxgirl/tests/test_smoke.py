@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import struct
@@ -270,13 +271,16 @@ def main():
           and top.get("similarity", 0) > 0, data)
     srv.shutdown()
 
-    ffmpeg_video = os.path.join(tmp, "test.mp4")
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=2",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", ffmpeg_video],
-                   capture_output=True, timeout=60)
-    data, err = c.tool("extract_video_frames", {"video_path": ffmpeg_video})
-    check("视频抽帧(ffmpeg)", not err and len(data.get("frames", [])) >= 2
-          and all(os.path.exists(p) for p in data["frames"]), (err, data))
+    if shutil.which("ffmpeg"):
+        ffmpeg_video = os.path.join(tmp, "test.mp4")
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=2",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", ffmpeg_video],
+                       capture_output=True, timeout=60)
+        data, err = c.tool("extract_video_frames", {"video_path": ffmpeg_video})
+        check("视频抽帧(ffmpeg)", not err and len(data.get("frames", [])) >= 2
+              and all(os.path.exists(p) for p in data["frames"]), (err, data))
+    else:
+        print("  SKIP 视频抽帧(ffmpeg)：未安装 ffmpeg，该项跳过，其余检查不受影响")
 
     data, err = c.tool("poke_qq", {"group_id": "777", "user_id": "10001"})
     check("戳一戳渠道未启用时报错", err and "未启用" in data.get("error", ""), (err, data))
@@ -305,6 +309,10 @@ def main():
     kaihei = next(m for m in data["memories"] if "开黑" in m["content"])
     check("遗忘曲线：旧记忆衰减不再置顶", "开黑" not in top["content"] and kaihei["score"] < 0.2,
           (top["content"], kaihei["score"]))
+    tianqi = next(m for m in data["memories"] if "天气" in m["content"])
+    check("遗忘曲线：新记忆得分不被错误衰减(P0回归)", tianqi["score"] >= 4.0, tianqi["score"])
+    data, _ = c.tool("prune_memory", {"keep_score": 1.0})
+    check("遗忘清理：keep_score=1.0 不误删新记忆(P0回归)", data.get("would_delete") == 0, data)
 
     data, _ = c.tool("prune_memory", {"keep_score": 3.5})
     check("遗忘清理预览(dry_run)", data.get("would_delete", 0) >= 3
