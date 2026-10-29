@@ -25,7 +25,9 @@ def _llm_chat(system, user):
     headers = {"Content-Type": "application/json"}
     if cfg.get("api_key"):
         headers["Authorization"] = "Bearer " + cfg["api_key"]
-    body = {"model": cfg.get("model", ""), "temperature": 0.9, "max_tokens": 500,
+    body = {"model": cfg.get("model", ""),
+            "temperature": float(cfg.get("temperature", 1.0)),
+            "max_tokens": int(cfg.get("max_tokens", 2000)),
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}]}
     req = urllib.request.Request(base.rstrip("/") + "/chat/completions",

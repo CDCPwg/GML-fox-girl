@@ -2,7 +2,7 @@
 import json
 import os
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "wechat": {"enabled": False, "adb_path": "adb", "device_serial": "", "input_tap_x": 0,
                "input_tap_y": 0, "human_trace": True},
     "brain": {"enabled": False, "api_base": "", "api_key": "", "model": "", "poll_seconds": 5,
+              "temperature": 1.0, "max_tokens": 2000,
               "fail_streak": 0, "last_fail": "", "backoff_max_seconds": 300},
     "media": {"max_download_mb": 50},
     "alerts": {"enabled": False, "poll_seconds": 30, "ttl_min": 60},

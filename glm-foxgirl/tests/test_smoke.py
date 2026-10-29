@@ -922,6 +922,20 @@ def main():
     check("数字串不再误转数值", data.get("brain", {}).get("model") == "12345", data.get("brain"))
     c.tool("set_config", {"key": "brain.model", "value": "test-model"})
 
+    print("[v1.3.1] 多模型适配（temperature/max_tokens 可配）")
+    c.tool("set_config", {"key": "brain.temperature", "value": 0.3})
+    c.tool("set_config", {"key": "brain.max_tokens", "value": 300})
+    c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private", "chat_id": "10001",
+                                "contact_id": "10001", "display_name": "阿明", "text": "温度测试"})
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    reqbody = json.loads(llmlog[-1])
+    check("temperature 从配置读取", reqbody.get("temperature") == 0.3, reqbody.get("temperature"))
+    check("max_tokens 从配置读取", reqbody.get("max_tokens") == 300, reqbody.get("max_tokens"))
+    c.tool("set_config", {"key": "brain.temperature", "value": 1.0})
+    c.tool("set_config", {"key": "brain.max_tokens", "value": 2000})
+
     llm.shutdown()
     nap3.shutdown()
 
