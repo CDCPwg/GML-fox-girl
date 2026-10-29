@@ -565,7 +565,7 @@ def main():
     check("hook 首次输出速览并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
           and "自动交接" in r1.stdout.decode("utf-8", "replace")
           and (cfgj.get("session") or {}).get("turns") == 0
-          and cfgj.get("intro", {}).get("version") == 10, cfgj.get("session"))
+          and cfgj.get("intro", {}).get("version") == 11, cfgj.get("session"))
     check("hook 二次静默", r2.stdout.decode("utf-8", "replace").strip() == "", r2.stdout)
 
     print("[v0.12] 管理守卫 / 95%提醒 / 远程交接")

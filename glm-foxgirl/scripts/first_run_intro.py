@@ -12,7 +12,7 @@ from datetime import datetime
 DATA = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 CFG = os.path.join(DATA, "config.json")
 
-GUIDE_VERSION = 10
+GUIDE_VERSION = 11
 
 GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 
@@ -42,12 +42,13 @@ GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 - 说"关联微信 <微信号>"发起 → 把 6 位确认码私下转给对方 → 对方在微信发"关联确认 <码>"（15 分钟内有效）
 
 ━━【默认关闭 · 需你知情开启】（说一句即开，绝不代开）━━
-- 15分钟消息心跳：定时自动收发消息 → 说"开启15分钟心跳"（间隔 1~15 分钟任选，如"开启1分钟心跳"更实时但消耗更多；关闭说"关闭心跳"）
+- 事件驱动消息监听（默认推荐）：看门脚本阻塞等消息，到达即唤醒会话处理（延迟≈1秒，零模型消耗）→ 说"启动消息监听"挂回；"停止监听"即卸
+- 心跳定时轮询（备选，与事件驱动互斥二选一）：定时自动收发消息 → 说"开启N分钟心跳"（间隔 1~15 分钟任选；关闭说"关闭心跳"）
 - 主动聊天：机器人自己找人搭话 → proactive.enabled true（有每日上限与安静时段保护）
 - 语义向量记忆：调用 embedding API 处理记忆 → 提供地址与密钥即可配好
 - 自动重开新页：自动交接后自动建恢复页定时任务 → limits.auto_reopen true
 - 即时系统告警（非模型调用，零消耗）：防火墙拦截/掉线恢复实时通知管理员 → alerts.enabled true
-- 实时大脑守护进程（准实时人格回复，秒级轮询 + 调用 LLM API，与心跳互斥二选一）→ 说"启用实时大脑"并提供 API 地址/密钥/模型；运行 python server/persona_mcp.py --brain
+- 实时大脑守护进程（准实时人格回复，秒级轮询 + 调用 LLM API，与事件驱动/心跳互斥三选一）→ 说"启用实时大脑"并提供 API 地址/密钥/模型；运行 python server/persona_mcp.py --brain
 
 ━━ 日常可调（在聊天区说即可）━━
 - 防风控：回复延迟 humanize.reply_delay_min_ms/max_ms、每小时限频 max_per_chat_per_hour、安静时段 proactive.quiet_hours

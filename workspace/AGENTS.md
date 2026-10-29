@@ -8,8 +8,9 @@
    - `setup_completed=false` → 本页是**配置页**：按 SessionStart 提示逐项完成配置（渠道就绪后重点核对 `admin.qq` 管理员名单与知情开启项），完成后执行 `/persona-finish-setup`，再引导用户新开对话作为聊天区。
    - `setup_completed=true` → 本页是**聊天区**：继续第 2 步。
 2. 调 `session_note(action=list, limit=3)` 读取最近接力笔记，再调 `session_progress()` 复位轮数计数——按笔记接上之前的脉络（未完成事项、待跟进话题）。
-3. 有待处理消息且用户已开启心跳/明确要求处理：按 persona-brain 技能的心跳循环处理。
-4. 用两三句向用户报到：激活人格、待处理消息数、collector 是否在运行、上次接力留下的要点。
+3. 挂回**事件驱动看门脚本**：`python glm-foxgirl/server/inbox_watch.py`（ZCode 后台任务，阻塞等消息到达后退出唤醒本会话）。
+4. 有待处理消息：按 persona-brain 技能的心跳循环处理，处理完重新挂回看门脚本。
+5. 用两三句向用户报到：激活人格、待处理消息数、collector 是否在运行、上次接力留下的要点。
 
 ## 值机守则
 
@@ -42,4 +43,5 @@
 
 - 数据（人格/记忆/画像/记录/笔记）：`~/.persona-bot/`（备份即备份一切）
 - 插件源码：本仓库 `glm-foxgirl/`（即 AGENTS.md 所在仓库的子目录）
-- 测试：`python glm-foxgirl/tests/test_smoke.py`（当前应 147/147；未装 ffmpeg 时自动跳过视频抽帧项）
+- 测试：`python glm-foxgirl/tests/test_smoke.py`（当前应 152/152；未装 ffmpeg 时自动跳过视频抽帧项）
+- 事件驱动看门：`python glm-foxgirl/server/inbox_watch.py`（ZCode 后台任务，消息到达即唤醒会话）
