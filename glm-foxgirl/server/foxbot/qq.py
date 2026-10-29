@@ -23,7 +23,8 @@ def napcat_post(action, params):
     headers = {"Content-Type": "application/json"}
     if cfg.get("napcat_token"):
         headers["Authorization"] = "Bearer " + cfg["napcat_token"]
-    req = urllib.request.Request(url, data=json.dumps(params).encode("utf-8"), headers=headers, method="POST")
+    req = urllib.request.Request(url, data=json.dumps(params, ensure_ascii=False).encode("utf-8"),
+                                 headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=20) as resp:
         body = json.loads(resp.read().decode("utf-8"))
     if body.get("retcode") not in (0, 1) or body.get("status") not in ("ok", "async", None):

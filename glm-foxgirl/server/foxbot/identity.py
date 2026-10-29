@@ -14,16 +14,27 @@ def _norm_pair(ca, ia, cb, ib):
 
 
 def _linked_ids(channel, contact_id):
+    """展开身份组（BFS 传递）：A↔B、B↔C 时 A 的身份组包含 C。"""
+    start = (channel, str(contact_id))
+    out = [start]
     with db.LOCK:
-        rows = db.CONN.execute(
-            "SELECT left_c, left_i, right_c, right_i FROM account_links"
-            " WHERE (left_c=? AND left_i=?) OR (right_c=? AND right_i=?)",
-            (channel, str(contact_id), channel, str(contact_id))).fetchall()
-    out = [(channel, str(contact_id))]
-    for r in rows:
-        for pair in ((r["left_c"], r["left_i"]), (r["right_c"], r["right_i"])):
-            if pair not in out:
-                out.append(pair)
+        frontier = [start]
+        while frontier:
+            conds = []
+            marks = []
+            for c, i in frontier:
+                conds.append("(left_c=? AND left_i=?) OR (right_c=? AND right_i=?)")
+                marks += [c, i, c, i]
+            rows = db.CONN.execute(
+                "SELECT left_c, left_i, right_c, right_i FROM account_links WHERE "
+                + " OR ".join(conds), marks).fetchall()
+            nxt = []
+            for r in rows:
+                for pair in ((r["left_c"], r["left_i"]), (r["right_c"], r["right_i"])):
+                    if pair not in out:
+                        out.append(pair)
+                        nxt.append(pair)
+            frontier = nxt
     return out
 
 

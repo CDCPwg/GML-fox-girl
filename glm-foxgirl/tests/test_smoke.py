@@ -97,9 +97,10 @@ def start_fake_napcat(port=3999, record=None):
 
     class H(BaseHTTPRequestHandler):
         def do_POST(self):
-            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            data = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             if record is not None:
-                record.append(self.path)
+                record.append({"path": self.path,
+                               "body": data.decode("utf-8", "replace") if data else ""})
             out = b'{"status":"ok","retcode":0,"data":null}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -504,7 +505,7 @@ def main():
     check("hook 首次输出速览并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
           and "自动交接" in r1.stdout.decode("utf-8", "replace")
           and (cfgj.get("session") or {}).get("turns") == 0
-          and cfgj.get("intro", {}).get("version") == 9, cfgj.get("session"))
+          and cfgj.get("intro", {}).get("version") == 10, cfgj.get("session"))
     check("hook 二次静默", r2.stdout.decode("utf-8", "replace").strip() == "", r2.stdout)
 
     print("[v0.12] 管理守卫 / 95%提醒 / 远程交接")
@@ -685,7 +686,7 @@ def main():
             "SELECT COUNT(*) FROM messages WHERE msg_type!='blocked' AND processed=0").fetchone()[0]
         check("被拦截内容不进待处理队列", pend == 1, pend)  # 仅早前的分块正常消息
         time.sleep(1.0)
-        alerts = [p for p in naplog if p == "/send_private_msg"]
+        alerts = [r for r in naplog if r["path"] == "/send_private_msg"]
         check("防火墙拦截即时告警直发管理员", len(alerts) >= 1, naplog)
         db2.close()
     finally:
@@ -758,14 +759,40 @@ def main():
     run = subprocess.run([sys.executable, SERVER, "--brain-once"],
                          env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
                          capture_output=True, timeout=120)
-    sent = [p for p in naplog2 if p == "/send_private_msg"]
+    sent = [r for r in naplog2 if r["path"] == "/send_private_msg"]
     check("私聊消息触发 LLM 并回复", len(llmlog) == 1 and len(sent) >= 1, (run.stderr[-200:], llmlog, naplog2))
     check("人格上下文注入 LLM", llmlog and "阿玲" in llmlog[0], None)
+    check("上下文不重复当前消息", llmlog[0].count("在吗") == 1, llmlog[0].count("在吗"))
     conn = sqlite3.connect(os.path.join(tmp, "persona.db"))
     proc = conn.execute("SELECT processed FROM messages WHERE contact_id='10001' AND direction='in'"
                         " AND content='在吗'").fetchone()
     conn.close()
     check("消息已标记处理", bool(proc) and proc[0] == 1, proc)
+
+    c.tool("set_config", {"key": "humanize.max_per_chat_per_hour", "value": 0})
+    c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private", "chat_id": "10001",
+                                "contact_id": "10001", "display_name": "阿明", "text": "限频期间再来一条"})
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    conn = sqlite3.connect(os.path.join(tmp, "persona.db"))
+    proc = conn.execute("SELECT processed FROM messages WHERE content='限频期间再来一条'").fetchone()
+    conn.close()
+    before = len(llmlog)
+    check("拦截类发送失败标记终态(不再无限重试)", bool(proc) and proc[0] == 1, proc)
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    check("终态消息不再重复消耗 LLM", len(llmlog) == before, len(llmlog))
+    c.tool("set_config", {"key": "humanize.max_per_chat_per_hour", "value": 12})
+
+    c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private", "chat_id": "10001",
+                                "contact_id": "10001", "display_name": "阿明", "text": "机器人状态"})
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    st_sent = [r for r in naplog2 if r["path"] == "/send_private_msg" and "状态" in r["body"]]
+    check("状态指令守护进程回执", len(st_sent) >= 1, naplog2)
 
     c.tool("manage_rules", {"action": "add", "list_type": "blacklist", "channel": "qq",
                             "scope": "contact", "target_id": "4001"})
@@ -794,6 +821,19 @@ def main():
     check("群聊非点名按概率门控跳过", len(llmlog) == before, len(llmlog))
     llm.shutdown()
     nap3.shutdown()
+
+    print("[v0.18.1] 身份组传递展开")
+    r1, _ = c.tool("link_accounts", {"action": "request", "channel": "qq", "contact_id": "10001",
+                                     "peer_channel": "qq", "peer_contact_id": "6001"})
+    c.tool("link_accounts", {"action": "confirm", "channel": "qq", "contact_id": "6001",
+                             "code": r1.get("code", "")})
+    r2, _ = c.tool("link_accounts", {"action": "request", "channel": "qq", "contact_id": "6001",
+                                     "peer_channel": "wechat", "peer_contact_id": "wx6001"})
+    c.tool("link_accounts", {"action": "confirm", "channel": "wechat", "contact_id": "wx6001",
+                             "code": r2.get("code", "")})
+    data, _ = c.tool("link_accounts", {"action": "ids", "channel": "qq", "contact_id": "10001"})
+    ids = [i for _, i in data.get("identities", [])]
+    check("身份组传递展开(A↔B↔C)", "wx6001" in ids, data)
 
     c.close()
     time.sleep(1.0)

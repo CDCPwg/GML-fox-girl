@@ -42,12 +42,14 @@ def _active_persona():
     return dict(row) if row else None
 
 
-def _recent_chat(channel, chat_id, limit=10):
+def _recent_chat(channel, chat_id, exclude_id=None, limit=10):
     with db.LOCK:
         rows = [dict(r) for r in db.CONN.execute(
-            "SELECT direction, display_name, content, created_at FROM messages"
-            " WHERE channel=? AND chat_id=? AND msg_type!='blocked' ORDER BY id DESC LIMIT ?",
-            (channel, str(chat_id), max(2, min(int(limit), 30))))]
+            "SELECT id, direction, display_name, content, created_at FROM messages"
+            " WHERE channel=? AND chat_id=? AND msg_type!='blocked' AND id!=?"
+            " ORDER BY id DESC LIMIT ?",
+            (channel, str(chat_id), exclude_id if exclude_id else -1,
+             max(2, min(int(limit), 30))))]
     return list(reversed(rows))
 
 
@@ -82,7 +84,7 @@ def _build_context(msg, persona):
                                    for e in gq["edges"][:6])
     except Exception:
         graph_hint = ""
-    recent = _recent_chat(channel, chat_id)
+    recent = _recent_chat(channel, chat_id, exclude_id=msg.get("id"))
     sys_prompt = (persona["prompt"] + ("\n\n说话风格：" + persona["style"] if persona["style"] else "")
                   + "\n\n【你正在 QQ 上与人聊天】直接输出要发送的回复文本：一条、短句、口语、"
                     "完全符合人格；不要解释、不要前缀引号、不要列表。如果这条消息不值得回复，只输出 [SKIP]。")
@@ -107,6 +109,17 @@ def _send_reply(msg, text):
         return qq.t_send_qq_message(chat_type=msg["chat_type"], chat_id=msg["chat_id"],
                                     text=text, contact_id=msg["contact_id"])
     return {"sent": False, "reason": "独立大脑 v1 仅处理 QQ 渠道；微信消息留给工作台处理"}
+
+
+def _canned_command_reply(cmd):
+    """守护进程场景下为无 reply 的指令生成罐装回执（ZCode 大脑场景由技能负责）。"""
+    d = cmd.get("data") or {}
+    if cmd.get("action") == "status":
+        return (f"[状态] 激活人格：{d.get('active_persona') or '（无）'}｜待处理消息：{d.get('pending_messages')}"
+                f"｜记忆：{d.get('memories')}｜collector：{'运行中' if d.get('collector_running') else '未运行'}")
+    if cmd.get("action") == "handover":
+        return "[交接] 会话总结与存档需在工作台（ZCode 聊天区）执行，这里无法代劳。"
+    return None
 
 
 def brain_process_once(stats=None):
@@ -137,6 +150,10 @@ def brain_process_once(stats=None):
             stats["commands"] += 1
             if cmd.get("allowed") and cmd.get("reply"):
                 _send_reply(msg, cmd["reply"])
+            elif cmd.get("allowed"):
+                canned = _canned_command_reply(cmd)
+                if canned:
+                    _send_reply(msg, canned)
             done()
             continue
         if channel != "qq":
@@ -168,8 +185,13 @@ def brain_process_once(stats=None):
             if sent.get("sent"):
                 stats["replied"] += 1
                 done()
+            elif sent.get("blocked"):
+                # 拦截类失败（限频/泄密防火墙）为终态：标记处理，避免守护进程无限重试
+                stats["skipped"] += 1
+                done()
             else:
-                stats["errors"] += 1  # 发送失败（限频/不可达）→ 不标记，留待下轮重试
+                # 网络类失败（NapCat 不可达等）：保留未处理，下轮重试
+                stats["errors"] += 1
         except Exception as e:
             stats["errors"] += 1
             print(f"[glm-foxgirl] brain process error: {e}", file=sys.stderr)
