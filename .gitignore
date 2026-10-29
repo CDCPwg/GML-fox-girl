@@ -1,6 +1,6 @@
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 .DS_Store
 .zcode/
 persona-data/
-"dist/"  
+dist/
