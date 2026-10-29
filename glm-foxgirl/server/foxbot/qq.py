@@ -2,6 +2,7 @@
 import base64
 import json
 import os
+import queue
 import re
 import socket
 import sys
@@ -204,6 +205,8 @@ def start_collector_thread():
         t.start()
         w = threading.Thread(target=_watchdog_loop, daemon=True)
         w.start()
+        s = threading.Thread(target=_alert_sender_loop, daemon=True)
+        s.start()
         print(f"[glm-foxgirl] collector listening on http://{host}:{port}/onebot/event", file=sys.stderr)
     except OSError:
         print(f"[glm-foxgirl] port {port} busy, assuming an external collector is running", file=sys.stderr)
@@ -395,25 +398,42 @@ def _webui_login_state(credential):
     return bool(login), uin
 
 
+ALERT_Q = queue.Queue()
+
+
 def _notify_admins(text):
-    """即时系统告警：罐装文本直发全部管理员（不经大脑、无 LLM 调用、绕过拟人延迟）。
-    alerts.enabled=false 时不发。任何失败静默留痕。"""
+    """即时系统告警：罐装文本入队，由后台发送线程异步直发全部管理员
+    （不经大脑、无 LLM 调用、绕过拟人延迟、不阻塞上报处理线程）。
+    alerts.enabled=false 时不发。队列超限丢弃并留痕。"""
     if not config.load_config().get("alerts", {}).get("enabled"):
         return
-    for admin in access._admin_set("qq"):
+    if ALERT_Q.qsize() >= 100:
+        log_error("alert queue overflow", f"drop: {text[:60]}")
+        return
+    ALERT_Q.put(text)
+
+
+def _alert_sender_loop():
+    while True:
         try:
-            napcat_post("send_private_msg", {
-                "user_id": int(admin),
-                "message": [{"type": "text", "data": {"text": text}}]})
-            with db.LOCK:
-                db.CONN.execute(
-                    "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, msg_type,"
-                    " content, out_kind, processed, created_at)"
-                    " VALUES('out','qq','private',?,?,'alert',?,'alert',1,?)",
-                    (str(admin), str(admin), text, db.now_str()))
-                db.CONN.commit()
-        except Exception as e:
-            log_error("alert notify failed", e)
+            text = ALERT_Q.get(timeout=0.5)
+        except Exception:
+            continue
+        for admin in access._admin_set("qq"):
+            try:
+                napcat_post("send_private_msg", {
+                    "user_id": int(admin),
+                    "message": [{"type": "text", "data": {"text": text}}]})
+                with db.LOCK:
+                    db.CONN.execute(
+                        "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, msg_type,"
+                        " content, out_kind, processed, created_at)"
+                        " VALUES('out','qq','private',?,?,'alert',?,'alert',1,?)",
+                        (str(admin), str(admin), text, db.now_str()))
+                    db.CONN.commit()
+            except Exception as e:
+                log_error("alert notify failed", e)
+        time.sleep(0.2)
 
 
 WATCH = {"last_state": None}

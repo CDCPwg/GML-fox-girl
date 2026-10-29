@@ -92,18 +92,8 @@ def t_get_config(**_):
 def t_set_config(key, value, **_):
     if not re.fullmatch(r"[a-zA-Z0-9_.]+", key or ""):
         raise ValueError("key 只能是字母数字下划线点，如 humanize.reply_delay_min_ms")
-    if isinstance(value, str):
-        low = value.lower()
-        if low in ("true", "false"):
-            value = low == "true"
-        else:
-            try:
-                value = int(value)
-            except ValueError:
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        value = value.lower() == "true"  # 仅布尔串自动转换；数字串保持原样（读取端各自 int()/float()）
     cfg = config.load_config()
     node = cfg
     parts = key.split(".")

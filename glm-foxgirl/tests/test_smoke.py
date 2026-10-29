@@ -117,6 +117,49 @@ def start_fake_napcat(port=3999, record=None):
     return srv
 
 
+def start_fake_llm_fail(port=3994, log=None):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n)
+            if log is not None:
+                log.append(body.decode("utf-8", "replace"))
+            out = b'{"error": {"message": "llm down"}}'
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def start_fake_bigfile(port=3992, clen=3_000_000):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(clen))
+            self.end_headers()
+            self.wfile.write(b"\0" * 4096)  # 少量正文即断开：测试只验证头部预检
+
+        def log_message(self, fmt, *args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 def make_card_png(path, card):
     def chunk(t, d):
         c = t + d
@@ -693,7 +736,7 @@ def main():
         pend = db2.execute(
             "SELECT COUNT(*) FROM messages WHERE msg_type!='blocked' AND processed=0").fetchone()[0]
         check("被拦截内容不进待处理队列", pend == 1, pend)  # 仅早前的分块正常消息
-        time.sleep(1.0)
+        time.sleep(2.5)
         alerts = [r for r in naplog if r["path"] == "/send_private_msg"]
         check("防火墙拦截即时告警直发管理员", len(alerts) >= 1, naplog)
         db2.close()
@@ -827,6 +870,49 @@ def main():
                    env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
                    capture_output=True, timeout=120)
     check("群聊非点名按概率门控跳过", len(llmlog) == before, len(llmlog))
+
+    print("[v1.1] LLM 退避 / 下载上限 / 配置收紧")
+    faillog = []
+    failllm = start_fake_llm_fail(3994, log=faillog)
+    c.tool("set_config", {"key": "brain.api_base", "value": "http://127.0.0.1:3994"})
+    c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private", "chat_id": "10001",
+                                "contact_id": "10001", "display_name": "阿明", "text": "LLM 宕机测试"})
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    data, _ = c.tool("get_config")
+    check("LLM 失败计数持久化", data.get("brain", {}).get("fail_streak") == 1, data.get("brain"))
+    conn = sqlite3.connect(os.path.join(tmp, "persona.db"))
+    proc = conn.execute("SELECT processed FROM messages WHERE content='LLM 宕机测试'").fetchone()
+    conn.close()
+    check("退避期间消息保留待补", bool(proc) and proc[0] == 0, proc)
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    check("退避窗口内跳过 LLM 空转", len(faillog) == 1, faillog)
+    failllm.shutdown()
+    c.tool("set_config", {"key": "brain.api_base", "value": "http://127.0.0.1:3997"})
+    time.sleep(6)  # 等退避窗口（streak=1 → 5s）过期
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    sent2 = [r for r in naplog2 if r["path"] == "/send_private_msg"]
+    check("退避结束恢复人格回复", len(sent2) >= 1, naplog2)
+    data, _ = c.tool("get_config")
+    check("成功后重置退避计数", data.get("brain", {}).get("fail_streak", 1) == 0, data.get("brain"))
+
+    bigsrv = start_fake_bigfile(3992)
+    c.tool("set_config", {"key": "media.max_download_mb", "value": 1})
+    data, err = c.tool("download_media", {"url": "http://127.0.0.1:3992/big.bin"})
+    check("下载大小上限拦截", err and "超过下载上限" in data.get("error", ""), (err, data))
+    bigsrv.shutdown()
+    c.tool("set_config", {"key": "media.max_download_mb", "value": 50})
+
+    c.tool("set_config", {"key": "brain.model", "value": "12345"})
+    data, _ = c.tool("get_config")
+    check("数字串不再误转数值", data.get("brain", {}).get("model") == "12345", data.get("brain"))
+    c.tool("set_config", {"key": "brain.model", "value": "test-model"})
+
     llm.shutdown()
     nap3.shutdown()
 

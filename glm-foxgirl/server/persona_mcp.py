@@ -12,6 +12,7 @@ stickers/qq/wechat/persona/session/webui。
 """
 import json
 import sys
+import time
 
 from foxbot import config, db, qq, webui
 from foxbot.access import (t_check_admin, t_report_guard)
@@ -152,10 +153,14 @@ def main():
         from foxbot.brain import main_brain
         main_brain(once="--brain-once" in sys.argv)
     elif "--collector" in sys.argv:
-        cfg = config.load_config()["collector"]
-        srv = webui.ThreadingHTTPServer((cfg.get("host", "127.0.0.1"), int(cfg.get("port", 3001))), qq.EventHandler)
-        print(f"[glm-foxgirl] collector daemon on http://{cfg['host']}:{cfg['port']}/onebot/event (Ctrl+C 退出)", file=sys.stderr)
-        srv.serve_forever()
+        # 独立收集器：HTTP 接收 + 看门狗 + 告警发送线程全套启动（与 MCP 模式同一入口）
+        qq.start_collector_thread()
+        print("[glm-foxgirl] collector daemon running (Ctrl+C 退出)", file=sys.stderr)
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
     else:
         main_mcp()
 

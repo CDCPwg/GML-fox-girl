@@ -122,9 +122,40 @@ def _canned_command_reply(cmd):
     return None
 
 
+def _llm_backoff_active(cfg):
+    """LLM 连续失败退避：streak>0 且距上次失败不足退避时长（5s×2^n，封顶
+    brain.backoff_max_seconds）时跳过本轮 LLM 调用，避免守护进程对宕机 API 空转。"""
+    streak = int(cfg.get("brain", {}).get("fail_streak", 0))
+    if streak <= 0:
+        return False
+    last = cfg.get("brain", {}).get("last_fail", "")
+    elapsed = time.time() - db._parse_dt(last) if last else 1e18
+    delay = min(float(cfg.get("brain", {}).get("backoff_max_seconds", 300)),
+                5.0 * (2 ** (streak - 1)))
+    return elapsed < delay
+
+
+def _llm_ok():
+    with db.LOCK:
+        cfg = config.load_config()
+        cfg.setdefault("brain", {})["fail_streak"] = 0
+        cfg["brain"]["last_fail"] = ""
+        config.save_config(cfg)
+
+
+def _llm_fail():
+    with db.LOCK:
+        cfg = config.load_config()
+        cfg.setdefault("brain", {})
+        cfg["brain"]["fail_streak"] = int(cfg["brain"].get("fail_streak", 0)) + 1
+        cfg["brain"]["last_fail"] = db.now_str()
+        config.save_config(cfg)
+
+
 def brain_process_once(stats=None):
     """单次处理轮：规则预筛 → LLM 人格回复 → 发送 → 收尾。返回统计。"""
-    stats = stats or {"seen": 0, "replied": 0, "skipped": 0, "blocked": 0, "commands": 0, "errors": 0}
+    stats = stats or {"seen": 0, "replied": 0, "skipped": 0, "blocked": 0, "commands": 0,
+                      "errors": 0, "backoff": 0}
     cfg = config.load_config()
     from .session import t_get_pending_messages, t_mark_processed
     data = t_get_pending_messages(limit=30)
@@ -173,28 +204,41 @@ def brain_process_once(stats=None):
             stats["skipped"] += 1
             done()
             continue
+        if _llm_backoff_active(cfg):
+            # LLM 不可用退避中：消息保留未处理，退避结束后自动补上
+            stats["backoff"] = stats.get("backoff", 0) + 1
+            continue
         try:
             system, user = _build_context(msg, persona)
-            reply = _llm_chat(system, user)
-            reply = re.sub(r"^['\"“”]+|['\"“”]+$", "", reply or "").strip()
-            if not reply or "[SKIP]" in reply:
-                stats["skipped"] += 1
-                done()
-                continue
-            sent = _send_reply(msg, reply)
-            if sent.get("sent"):
-                stats["replied"] += 1
-                done()
-            elif sent.get("blocked"):
-                # 拦截类失败（限频/泄密防火墙）为终态：标记处理，避免守护进程无限重试
-                stats["skipped"] += 1
-                done()
-            else:
-                # 网络类失败（NapCat 不可达等）：保留未处理，下轮重试
-                stats["errors"] += 1
         except Exception as e:
             stats["errors"] += 1
-            print(f"[glm-foxgirl] brain process error: {e}", file=sys.stderr)
+            print(f"[glm-foxgirl] brain context error: {e}", file=sys.stderr)
+            done()
+            continue
+        try:
+            reply = _llm_chat(system, user)
+            _llm_ok()
+        except Exception as e:
+            _llm_fail()
+            stats["errors"] += 1
+            print(f"[glm-foxgirl] brain llm error: {e}", file=sys.stderr)
+            continue
+        reply = re.sub(r"^['\"“”]+|['\"“”]+$", "", reply or "").strip()
+        if not reply or "[SKIP]" in reply:
+            stats["skipped"] += 1
+            done()
+            continue
+        sent = _send_reply(msg, reply)
+        if sent.get("sent"):
+            stats["replied"] += 1
+            done()
+        elif sent.get("blocked"):
+            # 拦截类失败（限频/泄密防火墙）为终态：标记处理，避免守护进程无限重试
+            stats["skipped"] += 1
+            done()
+        else:
+            # 网络类失败（NapCat 不可达等）：保留未处理，下轮重试
+            stats["errors"] += 1
     return stats
 
 

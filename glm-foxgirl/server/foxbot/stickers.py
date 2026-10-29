@@ -58,14 +58,28 @@ def t_pick_sticker(emotion="", **_):
 def t_download_media(url, **_):
     if not url or not url.startswith("http"):
         raise ValueError("需要 http(s) 图片/视频 URL")
+    cap_mb = float(config.load_config().get("media", {}).get("max_download_mb", 50))
+    cap = cap_mb * 1024 * 1024
     ext = ".jpg"
     m = re.search(r"\.(jpe?g|png|gif|mp4)(?:[?#]|$)", url, re.I)
     if m:
         ext = "." + m.group(1).lower()
     out = os.path.join(config.MEDIA_DIR, f"media_{int(time.time()*1000)}{ext}")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp, open(out, "wb") as f:
-        f.write(resp.read())
+    data = b""
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        cl = resp.headers.get("Content-Length")
+        if cl and int(cl) > cap:
+            raise ValueError(f"文件超过下载上限 {cap_mb:g}MB（Content-Length {cl}），已中止")
+        while True:
+            chunk = resp.read(524288)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > cap:
+                raise ValueError(f"文件超过下载上限 {cap_mb:g}MB，已中止下载")
+    with open(out, "wb") as f:
+        f.write(data)
     return {"path": out}
 
 
