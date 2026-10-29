@@ -1,4 +1,4 @@
-# GLM狐狸娘 驾驶舱
+﻿# GLM狐狸娘 驾驶舱
 
 这是 GLM狐狸娘 机器人的**专用工作区**：与机器人相关的对话（看消息、调人格、查记录、配置渠道）都在这里进行，避免和其他任务混在一起。
 
@@ -26,4 +26,4 @@
 
 - 数据（人格/记忆/画像/记录/笔记）：`~/.persona-bot/`（备份即备份一切）
 - 插件源码：本仓库 `glm-foxgirl/`（即 AGENTS.md 所在仓库的子目录）
-- 测试：`python glm-foxgirl\tests\test_smoke.py`（当前应 132/132）
+- 测试：`python glm-foxgirl\tests\test_smoke.py`（当前应 139/139；未装 ffmpeg 时自动跳过视频抽帧项）
