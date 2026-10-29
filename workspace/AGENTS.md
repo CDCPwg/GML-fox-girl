@@ -25,5 +25,5 @@
 ## 路径速查
 
 - 数据（人格/记忆/画像/记录/笔记）：`~/.persona-bot/`（备份即备份一切）
-- 插件源码：`D:\z code shuju\chajianku\pebanchajian\glm-foxgirl`
+- 插件源码：本仓库 `glm-foxgirl/`（即 AGENTS.md 所在仓库的子目录）
 - 测试：`python glm-foxgirl\tests\test_smoke.py`（当前应 132/132）
