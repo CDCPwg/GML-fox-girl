@@ -2,7 +2,6 @@
 import base64
 import json
 import os
-import queue
 import re
 import socket
 import sys
@@ -195,10 +194,23 @@ class EventHandler(BaseHTTPRequestHandler):
 COLLECTOR_SERVER = None
 
 
+def _collector_port_occupied(host, port):
+    """探测端口是否已有收集器在监听——避免 Windows 下 SO_REUSEADDR 双绑互抢。"""
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def start_collector_thread():
     global COLLECTOR_SERVER
     cfg = config.load_config()["collector"]
     host, port = cfg.get("host", "127.0.0.1"), int(cfg.get("port", 3001))
+    if _collector_port_occupied(host, port):
+        # 单例化：已有收集器实例时本进程不重复绑定（事件由在跑实例接收入库）
+        print(f"[glm-foxgirl] 端口 {port} 已有收集器运行，本进程不重复启动", file=sys.stderr)
+        return False
     try:
         COLLECTOR_SERVER = ThreadingHTTPServer((host, port), EventHandler)
         t = threading.Thread(target=COLLECTOR_SERVER.serve_forever, daemon=True)
@@ -208,8 +220,10 @@ def start_collector_thread():
         s = threading.Thread(target=_alert_sender_loop, daemon=True)
         s.start()
         print(f"[glm-foxgirl] collector listening on http://{host}:{port}/onebot/event", file=sys.stderr)
+        return True
     except OSError:
         print(f"[glm-foxgirl] port {port} busy, assuming an external collector is running", file=sys.stderr)
+        return False
 
 
 def collector_running():
@@ -398,42 +412,62 @@ def _webui_login_state(credential):
     return bool(login), uin
 
 
-ALERT_Q = queue.Queue()
-
-
 def _notify_admins(text):
-    """即时系统告警：罐装文本入队，由后台发送线程异步直发全部管理员
-    （不经大脑、无 LLM 调用、绕过拟人延迟、不阻塞上报处理线程）。
-    alerts.enabled=false 时不发。队列超限丢弃并留痕。"""
+    """即时系统告警：罐装文本写入持久化队列，由后台发送线程异步直发全部管理员
+    （不经大脑、无 LLM 调用、绕过拟人延迟、不阻塞上报处理线程；进程重启不丢）。
+    alerts.enabled=false 时不发。待发超限丢弃并留痕。"""
     if not config.load_config().get("alerts", {}).get("enabled"):
         return
-    if ALERT_Q.qsize() >= 100:
-        log_error("alert queue overflow", f"drop: {text[:60]}")
-        return
-    ALERT_Q.put(text)
+    with db.LOCK:
+        pending = db.CONN.execute("SELECT COUNT(*) FROM alert_queue WHERE sent=0").fetchone()[0]
+        if pending >= 100:
+            log_error("alert queue overflow", f"drop: {text[:60]}")
+            return
+        db.CONN.execute("INSERT INTO alert_queue(text, created_at) VALUES(?,?)",
+                        (text, db.now_str()))
+        db.CONN.commit()
 
 
-def _alert_sender_loop():
-    while True:
-        try:
-            text = ALERT_Q.get(timeout=0.5)
-        except Exception:
+def _drain_alerts_once():
+    """发送线程的一次巡检：发达到期告警（TTL 过期的直接弃置）。"""
+    ttl = float(config.load_config().get("alerts", {}).get("ttl_min", 60))
+    now_ts = time.time()
+    with db.LOCK:
+        rows = [dict(r) for r in db.CONN.execute(
+            "SELECT id, text, created_at FROM alert_queue WHERE sent=0 ORDER BY id LIMIT 10")]
+    for r in rows:
+        if (now_ts - db._parse_dt(r["created_at"])) / 60.0 > ttl:
+            with db.LOCK:
+                db.CONN.execute("UPDATE alert_queue SET sent=2 WHERE id=?", (r["id"],))
+                db.CONN.commit()
             continue
         for admin in access._admin_set("qq"):
             try:
                 napcat_post("send_private_msg", {
                     "user_id": int(admin),
-                    "message": [{"type": "text", "data": {"text": text}}]})
+                    "message": [{"type": "text", "data": {"text": r["text"]}}]})
                 with db.LOCK:
                     db.CONN.execute(
                         "INSERT INTO messages(direction, channel, chat_type, chat_id, contact_id, msg_type,"
                         " content, out_kind, processed, created_at)"
                         " VALUES('out','qq','private',?,?,'alert',?,'alert',1,?)",
-                        (str(admin), str(admin), text, db.now_str()))
+                        (str(admin), str(admin), r["text"], db.now_str()))
                     db.CONN.commit()
             except Exception as e:
                 log_error("alert notify failed", e)
+        with db.LOCK:
+            db.CONN.execute("UPDATE alert_queue SET sent=1 WHERE id=?", (r["id"],))
+            db.CONN.commit()
         time.sleep(0.2)
+
+
+def _alert_sender_loop():
+    while True:
+        try:
+            _drain_alerts_once()
+        except Exception as e:
+            log_error("alert sender error", e)
+        time.sleep(0.5)
 
 
 WATCH = {"last_state": None}

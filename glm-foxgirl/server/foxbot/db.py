@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS account_links(
   id INTEGER PRIMARY KEY AUTOINCREMENT, left_c TEXT, left_i TEXT,
   right_c TEXT, right_i TEXT, created_at TEXT,
   UNIQUE(left_c, left_i, right_c, right_i));
+CREATE TABLE IF NOT EXISTS alert_queue(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL,
+  sent INTEGER DEFAULT 0, created_at TEXT);
 """
 
 

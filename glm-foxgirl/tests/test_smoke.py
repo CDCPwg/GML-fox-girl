@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import zlib
 from datetime import datetime, timedelta
@@ -431,8 +432,8 @@ def main():
           and isinstance(data.get("top_profiles"), list), data)
 
     env2 = dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8")
-    web = subprocess.Popen([sys.executable, SERVER, "--webui", "--port", "3988"], env=env2,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    web = subprocess.Popen([sys.executable, SERVER, "--webui", "--port", "3988", "--token", "testtoken"],
+                           env=env2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     up = False
     for _ in range(30):
         try:
@@ -443,13 +444,21 @@ def main():
             time.sleep(0.3)
     try:
         page = urllib.request.urlopen("http://127.0.0.1:3988/", timeout=5).read().decode("utf-8")
-        st = json.loads(urllib.request.urlopen("http://127.0.0.1:3988/api/state", timeout=5).read().decode("utf-8"))
+        try:
+            urllib.request.urlopen("http://127.0.0.1:3988/api/state", timeout=5)
+            noauth_status = 200
+        except urllib.error.HTTPError as e:
+            noauth_status = e.code
+        st = json.loads(urllib.request.urlopen("http://127.0.0.1:3988/api/state?token=testtoken",
+                                               timeout=5).read().decode("utf-8"))
         req = urllib.request.Request("http://127.0.0.1:3988/api/mood",
                                      data=json.dumps({"mood": 1}).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
+                                     headers={"Content-Type": "application/json",
+                                              "X-Token": "testtoken"}, method="POST")
         mr = json.loads(urllib.request.urlopen(req, timeout=5).read().decode("utf-8"))
-        check("WebUI 页面与 API", up and "GLM狐狸娘" in page
-              and "personas" in st and mr.get("ok") is True, (up, bool(st), mr))
+        check("无令牌 API 返回 401", noauth_status == 401, noauth_status)
+        check("WebUI 页面/鉴权/API", "GLM狐狸娘" in page
+              and "personas" in st and mr.get("ok") is True, (bool(st), mr))
     finally:
         web.terminate()
         try:

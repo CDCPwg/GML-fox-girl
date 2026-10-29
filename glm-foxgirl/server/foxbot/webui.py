@@ -1,5 +1,6 @@
-﻿"""本地 WebUI 控制台（--webui，仅绑定 127.0.0.1）。"""
+﻿"""本地 WebUI 控制台（--webui，仅绑定 127.0.0.1，带令牌鉴权）。"""
 import json
+import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -34,13 +35,16 @@ small{color:#888}
 <nav id="tabs"></nav><main id="view"></main>
 <script>
 let S=null,tab='状态';
+const T=new URLSearchParams(location.search).get('token')||localStorage.getItem('glmT')||'';
+if(T)localStorage.setItem('glmT',T);
 const tabs=['状态','人格','记忆','画像','黑白名单','表情包','记录','统计'];
 function esc(s){return (s==null?'':''+s).replace(/</g,'&lt;')}
-async function act(path,body){await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});load()}
+function hdr(){return {'X-Token':T}}
+async function act(path,body){await fetch(path,{method:'POST',headers:Object.assign(hdr(),{'Content-Type':'application/json'}),body:JSON.stringify(body||{})});load()}
 async function loadMsgs(){const k=document.getElementById('qk').value,c=document.getElementById('qc').value;
- const d=await (await fetch('/api/messages?keyword='+encodeURIComponent(k)+'&contact_id='+encodeURIComponent(c)+'&limit=100')).json();
+ const d=await (await fetch('/api/messages?keyword='+encodeURIComponent(k)+'&contact_id='+encodeURIComponent(c)+'&limit=100',{headers:hdr()})).json();
  document.getElementById('msgbox').innerHTML=(d.messages||[]).map(m=>'<tr><td>'+m.created_at+'</td><td>'+(m.direction==='out'?'→发':'←收')+'</td><td>'+esc(m.channel)+'</td><td>'+esc(m.display_name||m.contact_id||'')+'</td><td>'+esc(m.content)+(m.media_url?' <small>'+esc(m.media_url)+'</small>':'')+'</td></tr>').join('')||'<tr><td colspan="5">无结果</td></tr>'}
-async function load(){S=await (await fetch('/api/state')).json();document.getElementById('ver').textContent='v'+S.status.version;render()}
+async function load(){const r=await fetch('/api/state',{headers:hdr()});if(r.status===401){document.getElementById('view').innerHTML='<p>令牌无效：请用启动时打印的带 token 地址重新打开本页。</p>';return}S=await r.json();document.getElementById('ver').textContent='v'+S.status.version;render()}
 function nav(){document.getElementById('tabs').innerHTML=tabs.map(t=>`<button class="${t===tab?'on':''}" onclick="tab='${t}';nav();render()">${t}</button>`).join('')}
 function render(){const v=document.getElementById('view');
  if(tab==='状态'){const c=S.status.counts;v.innerHTML=`<div class="kpi">
@@ -84,7 +88,18 @@ nav();load();setInterval(load,10000);
 """
 
 
+WEBUI_TOKEN = None
+
+
 class WebUIHandler(BaseHTTPRequestHandler):
+    def _authed(self):
+        if not WEBUI_TOKEN:
+            return True
+        q = parse_qs(urlsplit(self.path).query)
+        if (q.get("token") or [""])[0] == WEBUI_TOKEN:
+            return True
+        return self.headers.get("X-Token") == WEBUI_TOKEN
+
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -94,14 +109,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/":
+        path = urlsplit(self.path).path
+        if path == "/":
             body = WEBUI_HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        elif self.path == "/api/state":
+        elif not self._authed():
+            self._json({"error": "令牌无效：请用启动时打印的带 token 地址访问"}, 401)
+        elif path == "/api/state":
             self._json({"personas": t_manage_persona(action="list"),
                         "profiles": t_manage_profile(action="list"),
                         "rules": t_manage_rules(action="list"),
@@ -126,6 +144,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._authed():
+            self._json({"error": "令牌无效"}, 401)
+            return
         try:
             body = read_body(self)
             payload = json.loads(body or b"{}")
@@ -156,7 +177,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
         pass
 
 
-def main_webui(port):
+def main_webui(port, token=None):
+    global WEBUI_TOKEN
+    WEBUI_TOKEN = token or secrets.token_urlsafe(16)
     srv = ThreadingHTTPServer(("127.0.0.1", int(port)), WebUIHandler)
-    print(f"[glm-foxgirl] WebUI: http://127.0.0.1:{port}/ （仅本机可访问，Ctrl+C 退出）", file=__import__("sys").stderr)
+    print(f"[glm-foxgirl] WebUI: http://127.0.0.1:{port}/?token={WEBUI_TOKEN} （仅本机可访问，Ctrl+C 退出）",
+          file=__import__("sys").stderr)
     srv.serve_forever()

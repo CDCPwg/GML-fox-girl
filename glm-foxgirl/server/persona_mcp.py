@@ -148,7 +148,10 @@ def main():
         port = 8765
         if "--port" in sys.argv:
             port = int(sys.argv[sys.argv.index("--port") + 1])
-        webui.main_webui(port)
+        token = None
+        if "--token" in sys.argv:
+            token = sys.argv[sys.argv.index("--token") + 1]
+        webui.main_webui(port, token)
     elif "--brain" in sys.argv or "--brain-once" in sys.argv:
         from foxbot.brain import main_brain
         main_brain(once="--brain-once" in sys.argv)
