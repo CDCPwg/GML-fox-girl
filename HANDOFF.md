@@ -13,7 +13,7 @@
 | 本地 | `D:\z code shuju\chajianku\pebanchajian` |
 | 远端 | `https://github.com/CDCPwg/GML-fox-girl`（公开） |
 | 分支 | main（最新 `f690805` 之后若干提交） |
-| 标签 | v1.0 / v1.1 / v1.2 / v1.3 / v1.4 |
+| 标签 | v1.0 / v1.2 / v1.3 / v1.4（v1.1 从未打标，本地与远端均无） |
 | 版本 | 1.4.0（config.py / plugin.json / marketplace.json 三处同步） |
 | 测试 | 152 项端到端烟雾测试（`python glm-foxgirl\tests\test_smoke.py`，全部通过） |
 | 工具 | 49 个 MCP 工具 |
@@ -39,7 +39,7 @@ ZCode 会话 = 大脑（persona-brain 技能驱动），`server/foxbot/` 包 = 1
 ## 五、当前状态与已知问题
 
 - **无致命已知 bug**
-- 低危候选（留 V1.3）：LLM 退避持久化跨进程、WebUI 鉴权令牌刷新、下载大小上限微调
+- 原低危候选三项均已完成（有测试覆盖：LLM 失败计数持久化、WebUI 页面/鉴权/API、下载大小上限拦截）
 - 用户实测区：`D:\zcode\xiangmuwenjainjia\GLM NIANG`（NapCat 3000 已就绪，chunked 修复已验证）
 - 用户真实 NapCat 路径：`D:\bot\NapCat.Shell.Windows.OneKey\NapCat.52230.Shell`
 

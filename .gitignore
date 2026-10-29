@@ -4,3 +4,5 @@ __pycache__/
 .zcode/
 persona-data/
 dist/
+session_summary.json
+_session_summary.py
