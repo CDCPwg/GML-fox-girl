@@ -10,7 +10,8 @@ MEDIA_DIR = os.path.join(DATA_DIR, "media")
 
 DEFAULT_CONFIG = {
     "qq": {"enabled": False, "napcat_base_url": "http://127.0.0.1:3000", "napcat_token": "",
-           "webui_url": "http://127.0.0.1:6099", "webui_token": "", "credentials": {}},
+           "webui_url": "http://127.0.0.1:6099", "webui_token": "", "credentials": {},
+           "napcat_path": "", "autostart": False},
     "humanize": {"reply_delay_min_ms": 1200, "reply_delay_max_ms": 6000,
                  "max_per_chat_per_hour": 12, "outbox_ttl_min": 30},
     "proactive": {"enabled": False, "quiet_hours": "23:30-07:30", "max_per_day": 5,

@@ -216,7 +216,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 47 个工具", len(tools) == 47, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 49 个工具", len(tools) == 49, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -937,6 +937,17 @@ def main():
     data, _ = c.tool("link_accounts", {"action": "ids", "channel": "qq", "contact_id": "10001"})
     ids = [i for _, i in data.get("identities", [])]
     check("身份组传递展开(A↔B↔C)", "wx6001" in ids, data)
+
+    print("[v1.3] NapCat 发现与拉起")
+    fw = os.path.join(tmp, "napcatfw")
+    os.makedirs(fw, exist_ok=True)
+    shutil.copyfile(sys.executable, os.path.join(fw, "NapCatWinBootMain.exe"))
+    data, _ = c.tool("find_napcat", {"roots": [fw]})
+    check("发现 NapCat 框架目录", fw in data.get("found", []), data)
+    data, _ = c.tool("find_napcat", {"roots": [os.path.join(tmp, "empty_root")]})
+    check("空根目录明确返回未找到", data.get("count") == 0, data)
+    data, _ = c.tool("start_napcat", {"uin": "2139214603", "root": fw, "wait_seconds": 0})
+    check("拉起 NapCat（假 exe 返回 pid）", data.get("launched") is True and data.get("pid", 0) > 0, data)
 
     c.close()
     time.sleep(1.0)

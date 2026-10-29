@@ -4,6 +4,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -219,6 +220,8 @@ def start_collector_thread():
         w.start()
         s = threading.Thread(target=_alert_sender_loop, daemon=True)
         s.start()
+        e = threading.Thread(target=_ensure_napcat_loop, daemon=True)
+        e.start()
         print(f"[glm-foxgirl] collector listening on http://{host}:{port}/onebot/event", file=sys.stderr)
         return True
     except OSError:
@@ -470,6 +473,28 @@ def _alert_sender_loop():
         time.sleep(0.5)
 
 
+def _ensure_napcat_loop():
+    """插件启动时的 NapCat 自动拉起（qq.autostart=true 且 qq.enabled 时）：
+    探测 OneBot；不可达则发现并拉起 NapCat，一次性尝试后退出。"""
+    time.sleep(2)
+    try:
+        cfg = config.load_config()
+        if not (cfg.get("qq", {}).get("enabled") and cfg.get("qq", {}).get("autostart", True)):
+            return
+        try:
+            napcat_post("get_login_info", {})
+            return  # 本就在线
+        except Exception:
+            pass
+        res = t_start_napcat(wait_seconds=45)
+        if res.get("state") == "logged_in":
+            _notify_admins("[恢复] NapCat 已自动启动并上线。")
+        else:
+            _notify_admins("[提醒] NapCat 已自动启动，但登录未完成（需扫码或手动验证）。")
+    except Exception as e:
+        log_error("ensure napcat failed", e)
+
+
 WATCH = {"last_state": None}
 
 
@@ -515,6 +540,160 @@ def t_save_qq_credentials(uin, password, **_):
                     "掉线时将自动尝试快速登录；快速登录失败仍需在 NapCat 登录窗口手动验证（如扫码）。"}
 
 
+# ---------------------------------------------------------------- NapCat 发现与拉起
+
+NAPCAT_BOOT_EXE = "NapCatWinBootMain.exe"
+NAPCAT_SCAN_SKIP = {"windows", "windowsapps", "$recycle.bin", "$winreagent", "perflogs",
+                    "node_modules", "appdata", "recovery", "dumpstacklog.tmp"}
+
+
+def _napcat_uin():
+    creds = config.load_config().get("qq", {}).get("credentials", {})
+    u = str(creds.get("uin", "") or "")
+    return u or None
+
+
+def _qq_registry_dirs():
+    dirs = []
+    if sys.platform != "win32":
+        return dirs
+    import winreg
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            for sub in (r"SOFTWARE\Tencent\QQNT", r"SOFTWARE\WOW6432Node\Tencent\QQNT"):
+                try:
+                    with winreg.OpenKey(hive, sub, 0, view | winreg.KEY_READ) as k:
+                        for name in ("Install", "InstallPath", "UninstallString"):
+                            try:
+                                v, _ = winreg.QueryValueEx(k, name)
+                                if v:
+                                    d = v if os.path.isdir(v) else os.path.dirname(v)
+                                    if os.path.isdir(d):
+                                        dirs.append(d)
+                            except OSError:
+                                pass
+                except OSError:
+                    pass
+    return dirs
+
+
+def _scan_for_napcat(roots, max_depth=4, budget_seconds=12):
+    """限时扫描候选根目录，找含 NapCatWinBootMain.exe 的框架目录。"""
+    deadline = time.time() + budget_seconds
+    found = []
+
+    def walk(d, depth):
+        if len(found) >= 5 or time.time() > deadline or depth > max_depth:
+            return
+        try:
+            entries = set(os.listdir(d))
+        except OSError:
+            return
+        if NAPCAT_BOOT_EXE in entries:
+            found.append(d)
+            return
+        for e in sorted(entries):
+            if e.lower() in NAPCAT_SCAN_SKIP or e.startswith((".", "$")):
+                continue
+            p = os.path.join(d, e)
+            if os.path.isdir(p):
+                walk(p, depth + 1)
+
+    for r in roots:
+        if os.path.isdir(r):
+            walk(r, 0)
+    return found
+
+
+def _running_qq_dirs():
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='QQ.exe'\" | "
+             "Select-Object -ExpandProperty ExecutablePath"],
+            capture_output=True, timeout=20)
+        out = []
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if line and os.path.isfile(line):
+                out.append(os.path.dirname(line))
+        return out
+    except Exception:
+        return []
+
+
+def t_find_napcat(roots=None, **_):
+    """查找 NapCat 框架目录（含 NapCatWinBootMain.exe）。
+    给定 roots 时只扫描这些根目录（可预测，调试/测试用）；不给则走完整发现：
+    手动路径（qq.napcat_path）→ 正在运行的 QQ 进程 → 注册表安装目录 → 常见根目录限时扫描。"""
+    cfg = config.load_config().get("qq", {})
+    if roots:
+        found = _scan_for_napcat([r for r in roots if os.path.isdir(r)])
+        return {"found": found, "count": len(found),
+                "hint": ("启动：start_napcat()；固定路径：set_config qq.napcat_path"
+                         if found else "给定根目录下未找到 NapCat 框架目录")}
+    candidates = []
+    manual = (cfg.get("napcat_path") or "").strip()
+    if manual:
+        d = manual if os.path.isdir(manual) else os.path.dirname(manual)
+        if os.path.isfile(os.path.join(d, NAPCAT_BOOT_EXE)):
+            candidates.append(d)
+    for d in _running_qq_dirs():
+        if d not in candidates:
+            candidates.append(d)
+    for d in _qq_registry_dirs():
+        if d not in candidates and os.path.isfile(os.path.join(d, NAPCAT_BOOT_EXE)):
+            candidates.append(d)
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    scan_roots = [pf, os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                  os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+                  os.path.expanduser("~")]
+    for d in _scan_for_napcat([r for r in scan_roots if os.path.isdir(r)]):
+        if d not in candidates:
+            candidates.append(d)
+    valid = [c for c in candidates if os.path.isfile(os.path.join(c, NAPCAT_BOOT_EXE))]
+    return {"found": valid, "count": len(valid),
+            "hint": ("启动：start_napcat()；固定路径：set_config qq.napcat_path"
+                     if valid else
+                     "未找到 NapCat 框架目录（需含 NapCatWinBootMain.exe）。"
+                     "请确认 NapCat.Shell 已安装，或 set_config qq.napcat_path 手动指定")}
+
+
+def t_start_napcat(uin=None, root=None, wait_seconds=60, **_):
+    """查找并启动 NapCat（NapCatWinBootMain.exe <QQ号>），随后轮询 OneBot 最多 wait_seconds 秒。"""
+    cfg = config.load_config()
+    qqcfg = cfg.get("qq", {})
+    if root:
+        fw = [root] if os.path.isfile(os.path.join(root, NAPCAT_BOOT_EXE)) else []
+    else:
+        fw = t_find_napcat().get("found", [])
+    if not fw:
+        raise RuntimeError("未找到 NapCat 框架目录（需含 NapCatWinBootMain.exe）。"
+                           "确认 NapCat.Shell 已安装，或 set_config qq.napcat_path 手动指定")
+    framework = fw[0]
+    exe = os.path.join(framework, NAPCAT_BOOT_EXE)
+    u = str(uin or _napcat_uin() or "")
+    proc = subprocess.Popen([exe, u] if u else [exe], cwd=framework)
+    wait = max(0, min(int(wait_seconds), 180))
+    deadline = time.time() + wait
+    logged_in, uin_seen = None, None
+    while time.time() < deadline:
+        time.sleep(2)
+        try:
+            resp = napcat_post("get_login_info", {})
+            data = resp.get("data") or {}
+            if data.get("user_id"):
+                logged_in, uin_seen = True, str(data.get("user_id"))
+                break
+        except Exception:
+            pass
+    return {"launched": True, "pid": proc.pid, "framework": framework, "uin_arg": u or None,
+            "state": "logged_in" if logged_in else ("booting" if wait else "unknown"),
+            "hint": "启动后 NapCat 会按 webui.json 的 autoLoginAccount 自动登录；"
+                    "若卡扫码页请确认启动参数带了真实QQ号，或扫码登录一次"}
+
+
+
 def t_qq_login_status(**_):
     """QQ 登录状态探测：渠道未启用→unknown；先打 OneBot get_login_info；
     不可达再用 WebUI 区分 NapCat 宕机与掉线。"""
@@ -548,30 +727,52 @@ def t_qq_login_status(**_):
 
 
 def t_qq_relogin(**_):
-    """备用登录：快速登录优先（无需密码）；失败时提示手动验证。
-    账号密码已加密托管时自动尝试快速登录并在提醒中注明；任何情况下不回显密码。"""
-    creds = config.load_config()["qq"].get("credentials") or {}
-    uin = str(creds.get("uin", ""))
+    """备用登录全自动链：探测 → 发现并拉起 NapCat → WebUI 快速登录 → 如实降级提醒。
+    qq.autostart=false 时跳过自动拉起；任何情况下不回显已托管的账密。"""
+    notes = []
+    creds = config.load_config().get("qq", {}).get("credentials", {})
+    uin = str(creds.get("uin", "") or "")
+
+    def online():
+        try:
+            data = (napcat_post("get_login_info", {}) or {}).get("data") or {}
+            return bool(data.get("user_id")), str(data.get("user_id") or "")
+        except Exception:
+            return False, ""
+
+    ok, cur = online()
+    if ok:
+        return {"ok": True, "state": "logged_in", "uin": cur, "notes": ["本就在线，无需重登"]}
+
+    if config.load_config().get("qq", {}).get("autostart", True):
+        try:
+            res = t_start_napcat(uin=uin or None, wait_seconds=45)
+            notes.append(f"NapCat 已自动拉起（pid {res.get('pid')}，框架 {res.get('framework')}）")
+        except Exception as e:
+            notes.append("自动拉起失败：" + str(e)[:100])
+    else:
+        notes.append("qq.autostart=false，跳过自动拉起")
+
+    ok, cur = online()
+    if ok:
+        _notify_admins("[恢复] NapCat/QQ 已重新在线（uin " + (cur or "?") + "）。")
+        return {"ok": True, "state": "logged_in", "uin": cur, "notes": notes}
+
     credential = _webui_credential()
-    if credential:
-        if uin:
-            _webui_request("/api/QQLogin/SetQQLogin", {"uin": uin}, credential=credential)
-        else:
-            _webui_request("/api/QQLogin/SetQQLogin", {}, credential=credential)
+    if credential and cur:
+        try:
+            _webui_request("/api/QQLogin/SetQQLogin", {"uin": int(cur)}, credential=credential)
+        except Exception as e:
+            notes.append("快速登录尝试失败：" + str(e)[:80])
         for _ in range(3):
             time.sleep(2)
-            state = _webui_login_state(credential)
-            if state and state[0]:
-                return {"ok": True, "state": "logged_in", "method": "webui-quick-login",
-                        "uin": str(state[1] or uin or "")}
-    if not credential:
-        return {"ok": False, "state": "need_manual",
-                "credentials_stored": bool(creds.get("enc_password")),
-                "hint": "WebUI 未配置（qq.webui_url / qq.webui_token），无法自动快速登录。"
-                        "请打开 NapCat 登录窗口手动登录（扫码或输入密码），"
-                        "或在配置页提供 WebUI 地址与 token 以启用自动快速登录。"}
-    return {"ok": False, "state": "need_manual",
+            ok, cur = online()
+            if ok:
+                _notify_admins("[恢复] NapCat/QQ 已重新在线（快速登录）。")
+                return {"ok": True, "state": "logged_in", "uin": cur, "notes": notes}
+
+    _notify_admins("[告警] NapCat 自动恢复失败，需要人工登录（扫码或输入已托管账密）。")
+    return {"ok": False, "state": "need_manual", "notes": notes,
             "credentials_stored": bool(creds.get("enc_password")),
-            "hint": ("快速登录未成功。账号密码已加密托管，但 NapCat/NTQQ 不提供远程密码登录接口——"
-                     "请在 NapCat 登录窗口手动输入（或扫码）。已设置 webui.json 的 autoLoginAccount 时"
-                     "重启会自动快速登录（NapCatWinBootMain.exe 需传真实QQ号）。")}
+            "hint": ("自动恢复未完成。请在 NapCat 登录窗口手动登录（扫码或输入已托管账密），"
+                     "完成后 qq_login_status 会显示在线。")}
