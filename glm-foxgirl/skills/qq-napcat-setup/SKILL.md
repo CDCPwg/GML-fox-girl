@@ -37,7 +37,7 @@ NapCat 重启可能丢失登录态。三层恢复策略，建议全配：
 1. **autoLoginAccount**：编辑 NapCat 的 `webui.json`，设 `autoLoginAccount: "<机器人QQ号>"`，重启后自动快速登录。OneKey 启动脚本里 `NapCatWinBootMain.exe <QQ号>` 的参数必须是**真实QQ号**（占位符 10086 会导致卡扫码页）。
 2. **WebUI 自动快速登录**：`set_config("qq.webui_url", "http://127.0.0.1:6099")` 与 `set_config("qq.webui_token", "<WebUI密码>")`——掉线时 `qq_relogin` 自动尝试快速登录。注意 WebUI 的 Bearer 凭证必须**登录后立即使用**，陈旧凭证一律被拒（工具内部已按此处理）。
 3. **账号密码托管（可选）**：说"托管QQ登录凭证 <QQ号> <密码>"——密码经 Windows DPAPI 加密落盘（本机本用户才可解密，永不回显）。NTQQ 不支持远程密码登录，托管用于快速登录失败时的提醒上下文与本地保管；手动登录时在 NapCat 窗口输入。
-4. 心跳自动探测：`qq_login_status` → offline 就 `qq_relogin`；仍失败会明确提醒用户。
+4. 掉线自动探测：看门/大脑发现发送失败时 `qq_login_status` → offline 就 `qq_relogin`；仍失败会明确提醒用户。
 
 注意：NapCat 的 HTTP 上报使用 chunked 编码（无 Content-Length）——collector 已兼容；上报配置**只在 NapCat 进程启动时读取**，改完要重启 NapCat。自测时自发消息是 `message_sent` 类型，collector 只收 `post_type=="message"`。
 

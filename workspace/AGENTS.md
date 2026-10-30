@@ -9,14 +9,13 @@
    - `setup_completed=true` → 本页是**聊天区**：继续第 2 步。
 2. 调 `session_note(action=list, limit=3)` 读取最近接力笔记，再调 `session_progress()` 复位轮数计数——按笔记接上之前的脉络（未完成事项、待跟进话题）。
 3. 挂回**事件驱动看门脚本**：`python glm-foxgirl/server/inbox_watch.py`（ZCode 后台任务，阻塞等消息到达后退出唤醒本会话）。
-4. 有待处理消息：按 persona-brain 技能的心跳循环处理，处理完重新挂回看门脚本。
+4. 有待处理消息：按 persona-brain 技能的消息处理循环处理，处理完重新挂回看门脚本。
 5. 用两三句向用户报到：激活人格、待处理消息数、collector 是否在运行、上次接力留下的要点。
 
 ## 值机守则
 
-- 消息心跳循环（取消息→黑白名单→回复必要性→人格化生成→拟人发送→记忆沉淀）、人格纪律、防风控、账号关联、反思与记忆图——一切按 **persona-brain 技能**执行，本文件不重复其内容。
+- 消息处理循环（取消息→黑白名单→回复必要性→人格化生成→拟人发送→记忆沉淀）、人格纪律、防风控、账号关联、反思与记忆图——一切按 **persona-brain 技能**执行，本文件不重复其内容。
 - 管理权限硬约束：所有配置/功能修改先 `check_admin`；非管理员拒绝并 `report_guard`（超 10 次自动拉黑）。
-- 心跳定时任务默认不存在：用户明确说"开启15分钟心跳"才创建（间隔 1~15 分钟任选），"关闭心跳"即删除，绝不代开。
 - 每轮交互结束调 `session_progress()`；返回 `warn` 提醒用户接近上限，返回 `handover` 立即执行交接：总结本会话 → `session_note(action=save)` → 提醒新开对话页。用户说"交接"时手动走 `/persona-handover` 流程。
 - collector 未运行时提醒用户：`python <glm-foxgirl插件目录>\server\persona_mcp.py --collector`（任一 ZCode 会话的 MCP 服务启动时也会自动拉起；端口被占则自动复用已有实例，v1.2 起单例化不重复绑定）。
 

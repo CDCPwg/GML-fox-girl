@@ -2,7 +2,7 @@
 
 规则预筛（零成本）：黑白名单 → 聊天内管理指令 → 群聊回复必要性门控。
 人格上下文：人格表（现有人格）+ 关系画像（身份组）+ 相关记忆 + 记忆图 + 最近对话。
-与心跳自动化互斥：二选一，避免双脑重复回复。
+与事件驱动看门互斥：二选一，避免双脑重复回复。
 LLM 走 OpenAI 兼容 /chat/completions（brain.api_base/api_key/model，默认关闭）。
 """
 import json
@@ -403,13 +403,13 @@ def main_brain(once=False):
     cfg = config.load_config()["brain"]
     if not (cfg.get("api_base") and cfg.get("model")):
         print("[glm-foxgirl] 独立大脑未配置：需 set_config brain.api_base / brain.api_key / brain.model "
-              "（OpenAI 兼容接口）。注意：与心跳自动化互斥，二选一。", file=sys.stderr)
+              "（OpenAI 兼容接口）。注意：与事件驱动看门互斥，二选一。", file=sys.stderr)
         sys.exit(2)
     db.init_db()
     qq.start_collector_thread()
     start_h, end_h = _duty_hours()
     print(f"[glm-foxgirl] 独立大脑运行中：model={cfg['model']} poll={cfg.get('poll_seconds', 5)}s"
-          f"（值班 {start_h:02d}:00~{end_h:02d}:00，窗口外长睡歇班；与心跳自动化互斥，勿同时开启）", file=sys.stderr)
+          f"（值班 {start_h:02d}:00~{end_h:02d}:00，窗口外长睡歇班；与看门脚本互斥，勿同时开启）", file=sys.stderr)
     if once:
         print(json.dumps(brain_process_once(), ensure_ascii=False), file=sys.stderr)
         return

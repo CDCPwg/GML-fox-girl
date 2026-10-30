@@ -271,7 +271,7 @@ def t_session_note(action="list", note_id=None, title="", content="", limit=5, *
 
 
 def t_session_progress(note="", **_):
-    """会话进度标记：每轮用户交互/心跳处理完后调用。按轮数折算上下文占用估算百分比：
+    """会话进度标记：每轮用户交互/消息处理完后调用。按轮数折算上下文占用估算百分比：
     warn_pct（默认85%）提醒，handover_pct（默认95%）触发自动交接。
     新会话由 SessionStart hook 归零。开新页需用户手动，或 limits.auto_reopen=true 时由大脑建定时任务。"""
     cfg = config.load_config()

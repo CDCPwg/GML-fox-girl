@@ -276,7 +276,7 @@ def t_send_qq_message(chat_type, chat_id, text="", image_path=None, contact_id=N
                  out_kind, str(e)[:200], db.now_str()))
             db.CONN.commit()
         return {"sent": False, "queued": True,
-                "reason": "NapCat 暂时不可达，已入发送队列（心跳时 flush_outbox 自动补发）",
+                "reason": "NapCat 暂时不可达，已入发送队列（下轮消息处理时 flush_outbox 自动补发）",
                 "detail": str(e)[:120]}
     with db.LOCK:
         db.CONN.execute(

@@ -216,4 +216,4 @@ def t_wechat_read_notifications(raw_text=None, **_):
             raw_text = r.stdout.decode("utf-8", "replace")
     msgs = _parse_notifications(raw_text)
     return {"count": len(msgs), "messages": msgs,
-            "hint": "捞到的新消息可按 channel=wechat 走心跳循环处理；通知会聚合，同一人连发多句可能合并成一条"}
+            "hint": "捞到的新消息可按 channel=wechat 走消息处理循环处理；通知会聚合，同一人连发多句可能合并成一条"}

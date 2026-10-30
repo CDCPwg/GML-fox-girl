@@ -605,10 +605,12 @@ def main():
     r2 = subprocess.run([sys.executable, script], env=hook_env, capture_output=True, timeout=30)
     with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
         cfgj = json.load(f)
+    guide_version = int(re.search(r"GUIDE_VERSION = (\d+)",
+                                  open(script, encoding="utf-8").read()).group(1))
     check("hook 首次输出速览并重置会话", "配置页" in r1.stdout.decode("utf-8", "replace")
           and "自动交接" in r1.stdout.decode("utf-8", "replace")
           and (cfgj.get("session") or {}).get("turns") == 0
-          and cfgj.get("intro", {}).get("version") == 11, cfgj.get("session"))
+          and cfgj.get("intro", {}).get("version") == guide_version, cfgj.get("session"))
     check("hook 二次静默", r2.stdout.decode("utf-8", "replace").strip() == "", r2.stdout)
 
     print("[v0.12] 管理守卫 / 95%提醒 / 远程交接")

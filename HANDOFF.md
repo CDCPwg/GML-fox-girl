@@ -24,7 +24,7 @@
 
 ZCode 会话 = 大脑（persona-brain 技能驱动），`server/foxbot/` 包 = 18 个领域模块（纯 Python 标准库），NapCat = QQ 渠道，ADB = 微信渠道，`~/.persona-bot/` = 全部外部存储（备份即备份一切）。
 
-## 四、运行模式（三选一/可组合）
+## 四、运行模式（二选一/可组合）
 
 | 模式 | 启动命令 | 用途 |
 |---|---|---|
@@ -34,7 +34,7 @@ ZCode 会话 = 大脑（persona-brain 技能驱动），`server/foxbot/` 包 = 1
 | 独立收集器 | `python server/persona_mcp.py --collector` | 24/7 接收 NapCat 上报 |
 | 本地 WebUI | `python server/persona_mcp.py --webui --token <令牌>` | 可视化管理 |
 
-**互斥**：事件驱动看门、心跳定时轮询（cron）、独立大脑——三选一。
+**互斥**：事件驱动看门、独立大脑——二选一（定时心跳轮询功能已移除：看门与独立大脑足以覆盖其职责）。
 
 ## 五、当前状态与已知问题
 
