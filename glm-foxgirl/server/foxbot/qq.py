@@ -1,6 +1,7 @@
 """QQ 渠道：NapCat(OneBot 11) 收发、事件收集器、戳一戳、发送队列补发。"""
 import base64
 import json
+import hashlib
 import os
 import re
 import socket
@@ -384,7 +385,10 @@ def _webui_credential():
     token = config.load_config()["qq"].get("webui_token", "")
     if not token:
         return None
-    resp = _webui_request("/api/auth/login", {"token": token})
+    # NapCat WebUI 认证需要 sha256(token + ".napcat") 哈希；原始 token 会被拒绝
+    resp = _webui_request("/api/auth/login",
+                          {"hash": hashlib.sha256((token + ".napcat").encode()).hexdigest(),
+                           "totpCode": ""})
     if not resp:
         return None
     data = resp.get("data") if isinstance(resp, dict) else {}
@@ -759,13 +763,20 @@ def t_qq_relogin(**_):
         return {"ok": True, "state": "logged_in", "uin": cur, "notes": notes}
 
     credential = _webui_credential()
-    if credential and cur:
+    if credential:
         try:
-            _webui_request("/api/QQLogin/SetQQLogin", {"uin": int(cur)}, credential=credential)
+            # NapCat 新版 WebUI 只有快速登录接口（SetQuickLogin，免密）；旧 SetQQLogin 已废弃
+            _webui_request("/api/QQLogin/SetQuickLogin",
+                           {"uin": uin} if uin else {}, credential=credential)
         except Exception as e:
             notes.append("快速登录尝试失败：" + str(e)[:80])
-        for _ in range(3):
-            time.sleep(2)
+        for _ in range(10):
+            time.sleep(3)
+            state = _webui_login_state(credential)
+            if state and state[0]:
+                _notify_admins("[恢复] NapCat/QQ 已重新在线（快速登录）。")
+                return {"ok": True, "state": "logged_in", "method": "webui-quick-login",
+                        "uin": str(state[1] or cur or uin or ""), "notes": notes}
             ok, cur = online()
             if ok:
                 _notify_admins("[恢复] NapCat/QQ 已重新在线（快速登录）。")
@@ -775,4 +786,5 @@ def t_qq_relogin(**_):
     return {"ok": False, "state": "need_manual", "notes": notes,
             "credentials_stored": bool(creds.get("enc_password")),
             "hint": ("自动恢复未完成。请在 NapCat 登录窗口手动登录（扫码或输入已托管账密），"
-                     "完成后 qq_login_status 会显示在线。")}
+                     "完成后 qq_login_status 会显示在线。已设置 webui.json 的 autoLoginAccount 时"
+                     "重启会自动快速登录（NapCatWinBootMain.exe 需传真实QQ号）。")}

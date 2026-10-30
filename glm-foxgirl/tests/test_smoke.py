@@ -4,6 +4,7 @@
 Run: python tests/test_smoke.py
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -77,9 +78,18 @@ def start_fake_llm(port=3997, log=None):
         def do_POST(self):
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n)
+            text = body.decode("utf-8", "replace")
             if log is not None:
-                log.append(body.decode("utf-8", "replace"))
-            out = '{"choices":[{"message":{"content":"在的呀"}}]}'.encode("utf-8")
+                log.append(text)
+            if "记忆提取器" in text:  # _sediment 的提取调用：回一段可解析的沉淀 JSON
+                payload = {"memory": "阿明在玩星穹铁道", "importance": 4, "affinity_delta": 2,
+                           "impression_add": "参与过插件测试",
+                           "graph": [{"s": "阿明", "r": "在玩", "t": "星穹铁道"}]}
+                out = json.dumps({"choices": [{"message": {
+                    "content": json.dumps(payload, ensure_ascii=False)}}]},
+                    ensure_ascii=False).encode("utf-8")
+            else:
+                out = '{"choices":[{"message":{"content":"在的呀"}}]}'.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(out)))
@@ -109,6 +119,39 @@ def start_fake_napcat(port=3999, record=None):
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
             self.wfile.write(out)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def start_fake_webui(port=3996, log=None):
+    """模拟 NapCat WebUI：hash 认证发 Credential，登录状态恒在线（GET/POST 都答）。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def _reply(self, body=""):
+            if log is not None:
+                log.append({"path": self.path, "body": body})
+            if self.path == "/api/auth/login":
+                out = b'{"data":{"Credential":"cred-test"}}'
+            else:
+                out = b'{"data":{"login":true,"uin":"10001"}}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def do_POST(self):
+            self._reply(self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                        .decode("utf-8", "replace"))
+
+        def do_GET(self):
+            self._reply()
 
         def log_message(self, fmt, *args):
             pass
@@ -772,6 +815,24 @@ def main():
     check("备用登录未配 WebUI 时给出手动指引", data.get("state") == "need_manual"
           and data.get("credentials_stored") is True, data)
 
+    # 实测区回归（GLM NIANG 补丁⑥⑦）：WebUI hash 认证 + SetQuickLogin
+    # 端口用 3993：3996 已被本文件 chunked 段的假 NapCat 占用（Windows SO_REUSEADDR 会静默共存）
+    webuilog = []
+    webui = start_fake_webui(3993, log=webuilog)
+    c.tool("set_config", {"key": "qq.webui_url", "value": "http://127.0.0.1:3993"})
+    c.tool("set_config", {"key": "qq.webui_token", "value": "test-token"})
+    c.tool("set_config", {"key": "qq.autostart", "value": False})
+    data, _ = c.tool("qq_relogin", {})
+    want_hash = hashlib.sha256(b"test-token.napcat").hexdigest()
+    auths = [r for r in webuilog if r["path"] == "/api/auth/login"]
+    quicks = [r for r in webuilog if r["path"] == "/api/QQLogin/SetQuickLogin"]
+    check("WebUI hash 认证 sha256(token+.napcat)", any(want_hash in r["body"] for r in auths), auths)
+    check("快速登录调用 SetQuickLogin", len(quicks) >= 1, quicks)
+    check("快速登录成功回执", data.get("ok") is True
+          and data.get("method") == "webui-quick-login", data)
+    webui.shutdown()
+    c.tool("set_config", {"key": "qq.autostart", "value": True})
+
     print("[v0.16] 内容防火墙 / 人格强锁定")
     conn = sqlite3.connect(os.path.join(tmp, "persona.db"))
     conn.execute(
@@ -812,7 +873,14 @@ def main():
     c.tool("set_config", {"key": "brain.api_base", "value": "http://127.0.0.1:3997"})
     c.tool("set_config", {"key": "brain.api_key", "value": "test-key"})
     c.tool("set_config", {"key": "brain.model", "value": "test-model"})
+    c.tool("set_config", {"key": "brain.duty_start_hour", "value": 0})
     c.tool("set_config", {"key": "proactive.reply_probability_group", "value": 0})
+    sys.path.insert(0, os.path.join(ROOT, "server"))
+    os.environ["PERSONA_BOT_DATA_DIR"] = tmp
+    from foxbot import brain as _brain
+    c.tool("set_config", {"key": "brain.duty_end_hour", "value": 24})
+    check("值班窗口可配置（全天值班）", _brain._in_duty_window() is True, None)
+    c.tool("set_config", {"key": "brain.duty_end_hour", "value": 23})
     data, _ = c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private",
                                           "chat_id": "10001", "contact_id": "10001",
                                           "display_name": "阿明", "text": "在吗"})
@@ -828,6 +896,24 @@ def main():
                         " AND content='在吗'").fetchone()
     conn.close()
     check("消息已标记处理", bool(proc) and proc[0] == 1, proc)
+
+    # 实测区回归（GLM NIANG 补丁⑤）：回复成功后实时沉淀（记忆/画像/记忆图）
+    c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private",
+                                "chat_id": "10001", "contact_id": "10001",
+                                "display_name": "阿明", "text": "跟你聊测试挺开心的"})
+    n_before_sediment = len(llmlog)
+    subprocess.run([sys.executable, SERVER, "--brain-once"],
+                   env=dict(os.environ, PERSONA_BOT_DATA_DIR=tmp, PYTHONIOENCODING="utf-8"),
+                   capture_output=True, timeout=120)
+    check("长消息回复后触发沉淀 LLM", len(llmlog) == n_before_sediment + 2
+          and "记忆提取器" in llmlog[-1], (len(llmlog), llmlog[-1][:120]))
+    data, _ = c.tool("query_memory", {"keyword": "星穹铁道"})
+    check("实时沉淀写入事实记忆", any("星穹铁道" in m["content"] for m in data.get("memories", [])), data)
+    data, _ = c.tool("graph_query", {"entity": "阿明", "depth": 1})
+    check("实时沉淀写入记忆图", any(e.get("relation") == "在玩" for e in data.get("edges", [])), data)
+    data, _ = c.tool("manage_profile", {"action": "get", "channel": "qq", "contact_id": "10001"})
+    check("实时沉淀更新画像印象",
+          "参与过插件测试" in ((data.get("profile") or {}).get("impression") or ""), data)
 
     c.tool("set_config", {"key": "humanize.max_per_chat_per_hour", "value": 0})
     c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private", "chat_id": "10001",

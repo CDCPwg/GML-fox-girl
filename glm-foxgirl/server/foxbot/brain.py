@@ -11,6 +11,7 @@ import re
 import sys
 import time
 import urllib.request
+from datetime import datetime, timedelta
 
 from . import access, config, db, graph, identity, qq
 from .memory import t_query_memory
@@ -25,6 +26,8 @@ def _llm_chat(system, user):
     headers = {"Content-Type": "application/json"}
     if cfg.get("api_key"):
         headers["Authorization"] = "Bearer " + cfg["api_key"]
+    # temperature/max_tokens 可经 brain.temperature / brain.max_tokens 覆盖；
+    # 思考型模型（如 kimi-k2.6）强制 temperature=1，reasoning 计入 max_tokens，需留足余量
     body = {"model": cfg.get("model", ""),
             "temperature": float(cfg.get("temperature", 1.0)),
             "max_tokens": int(cfg.get("max_tokens", 2000)),
@@ -106,6 +109,62 @@ def _build_context(msg, persona):
     return sys_prompt, "\n".join(user_parts)
 
 
+def _sediment(msg, reply):
+    """实时沉淀（实测区验证）：每条回复成功后一次轻量提取——事实记忆/印象增量/好感/记忆图。
+    过短闲聊跳过；提取结果宁缺毋滥；任何异常静默跳过，绝不影响回复主链路。"""
+    text = (msg.get("content") or "").strip()
+    if len(text) < 5:
+        return
+    channel, contact_id, chat_id = msg["channel"], str(msg["contact_id"] or ""), msg["chat_id"]
+    sys_prompt = (
+        "你是记忆提取器。根据对话片段输出严格 JSON（无 markdown、无解释、无多余键），字段："
+        '{"memory":"值得长期记住的事实（对方偏好/约定/重要事件/关系变化；纯闲聊则为空字符串）",'
+        '"importance":1到5,"affinity_delta":-5到5,'
+        '"impression_add":"值得追加到印象的一句话（没有则为空字符串）",'
+        '"graph":[{"s":"主体","r":"关系(喜欢/讨厌/养了/在玩/擅长/提到/约定等)","t":"对象"}]}'
+        "。宁缺毋滥：没有值得记的就留空、0、空数组。")
+    user = (f"对方：{msg.get('display_name') or contact_id}\n"
+            f"对方说：{text[:300]}\n我回复：{reply[:200]}")
+    try:
+        raw = _llm_chat(sys_prompt, user)
+    except Exception:
+        return
+    m = re.search(r"\{.*\}", raw or "", re.S)
+    if not m:
+        return
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return
+    try:
+        from .identity import t_manage_profile
+        from .memory import t_store_memory
+        mem = str(data.get("memory") or "").strip()
+        if mem:
+            t_store_memory(mem[:200], channel=channel, chat_id=str(chat_id),
+                           contact_id=contact_id, kind="fact",
+                           importance=max(1, min(5, int(data.get("importance") or 3))))
+        delta = max(-5, min(5, int(data.get("affinity_delta") or 0)))
+        add = str(data.get("impression_add") or "").strip()
+        if add or delta:
+            with db.LOCK:
+                row = db.CONN.execute(
+                    "SELECT impression FROM profiles WHERE channel=? AND contact_id=?",
+                    (channel, contact_id)).fetchone()
+            base = dict(row)["impression"] if row else ""
+            merged = ((base + ("；" if base else "") + add)[:400]) if add else base
+            t_manage_profile("upsert", channel=channel, contact_id=contact_id,
+                             impression=merged or None, affinity_delta=delta)
+        for g in (data.get("graph") or [])[:3]:
+            s = str(g.get("s") or "").strip()[:30]
+            r = str(g.get("r") or "").strip()[:10]
+            t = str(g.get("t") or "").strip()[:30]
+            if s and r and t:
+                graph.t_graph_add(s, r, t)
+    except Exception as e:
+        print(f"[glm-foxgirl] brain sediment error: {e}", file=sys.stderr)
+
+
 def _send_reply(msg, text):
     if msg["channel"] == "qq":
         return qq.t_send_qq_message(chat_type=msg["chat_type"], chat_id=msg["chat_id"],
@@ -168,6 +227,16 @@ def brain_process_once(stats=None):
         mid = msg["id"]
         channel, chat_type, chat_id = msg["channel"], msg["chat_type"], msg["chat_id"]
         contact_id = str(msg["contact_id"] or "")
+
+        # 值班边界保护：跳过今天开工时刻前创建的消息（夜班看门的交接处理中，防双脑重复回复）
+        try:
+            start_h, _ = _duty_hours()
+            created = datetime.strptime(msg.get("created_at") or "", "%Y-%m-%d %H:%M:%S")
+            if created < datetime.now().replace(hour=start_h, minute=0, second=0,
+                                                microsecond=0):
+                continue
+        except ValueError:
+            pass
 
         def done():
             t_mark_processed([mid])
@@ -234,6 +303,7 @@ def brain_process_once(stats=None):
         if sent.get("sent"):
             stats["replied"] += 1
             done()
+            _sediment(msg, reply)
         elif sent.get("blocked"):
             # 拦截类失败（限频/泄密防火墙）为终态：标记处理，避免守护进程无限重试
             stats["skipped"] += 1
@@ -244,6 +314,91 @@ def brain_process_once(stats=None):
     return stats
 
 
+def _duty_hours():
+    bcfg = config.load_config().get("brain", {})
+    try:
+        start_h = int(bcfg.get("duty_start_hour", 9))
+    except (TypeError, ValueError):
+        start_h = 9
+    try:
+        end_h = int(bcfg.get("duty_end_hour", 23))
+    except (TypeError, ValueError):
+        end_h = 23
+    return start_h, end_h
+
+
+def _in_duty_window():
+    """值班时段（双班架构）：默认 09:00~23:00 由大脑回复，窗口外自行歇班（长睡零空转），
+    与看门脚本（同时段静默长睡）构成精确到秒的昼夜交接。
+    brain.duty_start_hour / brain.duty_end_hour 可改班次（start>end 视为跨午夜班）。"""
+    start_h, end_h = _duty_hours()
+    h = datetime.now().hour
+    if start_h <= end_h:
+        return start_h <= h < end_h
+    return h >= start_h or h < end_h
+
+
+_proactive_next = [0.0]
+
+
+def _brain_proactive():
+    """值班期主动搭话：随机 20~45 分钟一次，额度/话题门控，宁缺毋滥。"""
+    if time.time() < _proactive_next[0]:
+        return
+    _proactive_next[0] = time.time() + random.uniform(20 * 60, 45 * 60)
+    try:
+        from .session import t_proactive_due
+        if not t_proactive_due().get("proactive_allowed"):
+            return
+        persona = _active_persona()
+        if not persona:
+            return
+        with db.LOCK:
+            row = db.CONN.execute(
+                "SELECT channel, contact_id, display_name, affinity, impression, style_notes"
+                " FROM profiles WHERE affinity > 0 ORDER BY RANDOM() LIMIT 1").fetchone()
+        if not row:
+            return
+        prof = dict(row)
+        if prof["channel"] != "qq":
+            return  # 独立大脑 v1 只发 QQ
+        mem = t_query_memory(contact_id=prof["contact_id"], channel=prof["channel"],
+                             limit=5).get("memories", [])
+        gq = graph.t_graph_query(entity=(prof.get("display_name") or ""), depth=1, limit=8)
+        graph_hint = ""
+        if gq.get("found"):
+            graph_hint = "；".join(f"{e['src_name']}-{e['relation']}-{e['dst_name']}"
+                                   for e in gq["edges"][:6])
+        mood = (config.load_config().get("mood", {}) or {}).get("current", 0)
+        sys_prompt = (persona["prompt"] + ("\n\n说话风格：" + persona["style"] if persona["style"] else "")
+                      + "\n\n【你正在主动找对方搭话】直接输出要发送的一条开场白：短句、口语、自然"
+                        "（\"突然想起…\"式），结合下面的话题素材；没有自然的话头就只输出 [SKIP]，绝不硬聊。")
+        parts = [f"对方：{prof.get('display_name') or prof['contact_id']}（好感 {prof.get('affinity', 0)}）"]
+        if prof.get("impression"):
+            parts.append("印象：" + str(prof["impression"])[:200])
+        if prof.get("style_notes"):
+            parts.append("相处方式：" + str(prof["style_notes"])[:100])
+        if mem:
+            parts.append("相关记忆：" + "；".join(m["content"][:60] for m in mem[:5]))
+        if graph_hint:
+            parts.append("关联事实：" + graph_hint)
+        if mood:
+            parts.append(f"当前心情温度：{mood:+d}")
+        recent = _recent_chat(prof["channel"], prof["contact_id"], limit=6)
+        if recent:
+            parts.append("最近对话：\n" + "\n".join(
+                f"{'我' if r['direction'] == 'out' else (r['display_name'] or '对方')}：{r['content'][:60]}"
+                for r in recent[-6:]))
+        reply = _llm_chat(sys_prompt, "\n".join(parts))
+        reply = re.sub(r"^['\"“”]+|['\"“”]+$", "", reply or "").strip()
+        if not reply or "[SKIP]" in reply:
+            return
+        qq.t_send_qq_message(chat_type="private", chat_id=prof["contact_id"],
+                             contact_id=prof["contact_id"], text=reply, out_kind="proactive")
+    except Exception as e:
+        print(f"[glm-foxgirl] brain proactive error: {e}", file=sys.stderr)
+
+
 def main_brain(once=False):
     cfg = config.load_config()["brain"]
     if not (cfg.get("api_base") and cfg.get("model")):
@@ -252,14 +407,25 @@ def main_brain(once=False):
         sys.exit(2)
     db.init_db()
     qq.start_collector_thread()
+    start_h, end_h = _duty_hours()
     print(f"[glm-foxgirl] 独立大脑运行中：model={cfg['model']} poll={cfg.get('poll_seconds', 5)}s"
-          f"（实时人格回复；与心跳自动化互斥，勿同时开启）", file=sys.stderr)
+          f"（值班 {start_h:02d}:00~{end_h:02d}:00，窗口外长睡歇班；与心跳自动化互斥，勿同时开启）", file=sys.stderr)
     if once:
         print(json.dumps(brain_process_once(), ensure_ascii=False), file=sys.stderr)
         return
     while True:
         try:
-            brain_process_once()
+            if _in_duty_window():
+                brain_process_once()
+                _brain_proactive()
+            else:
+                # 歇班：长睡到下一班开工时刻，期间零查询零调用
+                now = datetime.now()
+                start = now.replace(hour=_duty_hours()[0], minute=0, second=0, microsecond=0)
+                if start <= now:
+                    start += timedelta(days=1)
+                time.sleep(max(30, (start - now).total_seconds()))
+                continue
         except Exception as e:
             print(f"[glm-foxgirl] brain loop error: {e}", file=sys.stderr)
         time.sleep(max(2, int(cfg.get("poll_seconds", 5))))
