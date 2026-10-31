@@ -313,14 +313,54 @@ def brain_process_once(stats=None):
 
 
 _DUTY_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$")
+_DUTY_WARNED = [False]
+
+
+def _warn_bad_duty(raw):
+    """值班表配置非法时警告一次（进程内只打一行，防长睡循环刷屏）。"""
+    if not _DUTY_WARNED[0]:
+        _DUTY_WARNED[0] = True
+        print(f"[glm-foxgirl] brain.duty_windows 配置非法（{raw!r}），已按全天值班处理",
+              file=sys.stderr)
+
+
+def _merge_segments(segs):
+    """重叠/相邻段合并为并集（跨午夜段先拆尾/头两段再合并、最后还原），
+    保证返回的段互不重叠——看门/大脑的"当前所在段"判定因此唯一。"""
+    flat = []
+    for s, e in segs:
+        if s < e:
+            flat.append((s, e))
+        else:  # 跨午夜：拆成当日尾段 + 次日头段
+            if s < 1440:
+                flat.append((s, 1440))
+            if e > 0:
+                flat.append((0, e))
+    merged = []
+    for s, e in sorted(flat):
+        if merged and s <= merged[-1][1]:
+            if e > merged[-1][1]:
+                merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    tail = next((x for x in merged if x[1] == 1440), None)
+    head = next((x for x in merged if x[0] == 0 and x[1] != 1440), None)
+    if tail and head:
+        merged = [x for x in merged if x != tail and x != head]
+        merged.append((tail[0], head[1]))
+    return sorted(merged)
 
 
 def _duty_windows():
     """值班表（可选，含自动换班）：brain.duty_windows，逗号分隔多段 "HH:MM-HH:MM"，
-    如 "09:00-23:00" 或 "22:00-06:00,09:00-12:00"（支持跨午夜，段数不限）。
+    如 "09:00-23:00" 或 "22:00-06:00,09:00-12:00"（支持跨午夜，段数不限，重叠段取并集）。
     未设置 → 全天值班：LLM 与看门二选一处理消息，无换班；设置后换班自动生效
     （换班内置于值班表，不单设开关）。兼容旧键：仅设 duty_start_hour/duty_end_hour
-    时视为单段 "HH:00-HH:00"。返回 [(start_min, end_min), ...] 或 None。"""
+    时视为单段 "HH:00-HH:00"。返回 [(start_min, end_min), ...] 或 None。
+    有效性：小时 0~24（24 仅整点，即 24:00）、分钟 0~59；配置非空但全部段非法时
+    打一行 stderr 警告并按全天值班处理。
+    注意：解析逻辑与 server/inbox_watch.py 的 duty_windows() 为同源副本
+    （看门独立运行，故意不 import foxbot），格式演进必须两处同步。"""
     bcfg = config.load_config().get("brain", {})
     raw = str(bcfg.get("duty_windows") or "").strip()
     if not raw:
@@ -330,17 +370,24 @@ def _duty_windows():
         try:
             raw = f"{int(sh):02d}:00-{int(eh):02d}:00"
         except (TypeError, ValueError):
+            _warn_bad_duty(str(sh))
             return None
     segs = []
     for part in raw.split(","):
         m = _DUTY_RE.match(part.strip())
         if not m:
             continue
-        s = int(m.group(1)) * 60 + int(m.group(2))
-        e = int(m.group(3)) * 60 + int(m.group(4))
+        hh1, mm1, hh2, mm2 = (int(m.group(i)) for i in range(1, 5))
+        if not (0 <= hh1 <= 24 and 0 <= mm1 <= 59 and 0 <= hh2 <= 24 and 0 <= mm2 <= 59):
+            continue  # 非法时段（如 09:99、24:30）直接拒绝，绝不让班表静默偏移
+        s, e = hh1 * 60 + mm1, hh2 * 60 + mm2
         if s <= 1440 and e <= 1440 and s != e:
             segs.append((s, e))
-    return segs or None
+    if not segs:
+        if raw:
+            _warn_bad_duty(raw)
+        return None
+    return _merge_segments(segs)
 
 
 def _in_duty_window(now=None):
@@ -360,8 +407,11 @@ def _in_duty_window(now=None):
 
 
 def _next_duty_start(cur_min):
-    """下一班开工的分钟数：今天尚未开始的最早段起点，否则明天最早班。"""
+    """下一班开工的分钟数：今天尚未开始的最早段起点，否则明天最早班。
+    无班可上（值班表恰被清空等竞态）返回 None，调用方短睡重读配置。"""
     starts = sorted(s for s, _ in (_duty_windows() or []))
+    if not starts:
+        return None
     for s in starts:
         if s > cur_min:
             return s
@@ -453,9 +503,12 @@ def main_brain(once=False):
             else:
                 # 值班表启用且当前歇班：长睡到下一班开工，期间零查询零调用
                 now = datetime.now()
-                cur = now.hour * 60 + now.minute
+                nxt = _next_duty_start(now.hour * 60 + now.minute)
+                if nxt is None:
+                    time.sleep(30)  # 值班表恰被清空：短睡重读配置
+                    continue
                 start = (now.replace(hour=0, minute=0, second=0, microsecond=0)
-                         + timedelta(minutes=_next_duty_start(cur)))
+                         + timedelta(minutes=nxt))
                 if start <= now:
                     start += timedelta(days=1)
                 time.sleep(max(30, (start - now).total_seconds()))

@@ -895,6 +895,41 @@ def main():
           and _brain._in_duty_window(datetime(2026, 1, 1, 8, 0)) is False, None)
     c.tool("set_config", {"key": "brain.duty_start_hour", "value": ""})
     c.tool("set_config", {"key": "brain.duty_end_hour", "value": ""})
+
+    # 测试会话 v1.5.0 勘误回归：P2-1 非法分钟 / P2-2 全段非法警告 / P3-3 空班表 / P3-7 重叠段
+    import contextlib
+    import importlib.util
+    import io
+    c.tool("set_config", {"key": "brain.duty_windows", "value": "09:00-23:00,09:99-10:00"})
+    check("非法分钟段被拒不偏移", _brain._duty_windows() == [(540, 1380)], _brain._duty_windows())
+    c.tool("set_config", {"key": "brain.duty_windows", "value": "0900-2300,25:00-26:00"})
+    _brain._DUTY_WARNED[0] = False
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        segs = _brain._duty_windows()
+    check("全段非法降级全天且有警告", segs is None and "非法" in buf.getvalue(),
+          (segs, buf.getvalue()))
+    c.tool("set_config", {"key": "brain.duty_windows",
+                          "value": "09:00-13:00,11:00-15:00,22:00-06:00"})
+    check("重叠段合并为并集", _brain._duty_windows() == [(540, 900), (1320, 360)],
+          _brain._duty_windows())
+    check("下一班开工点三分支", _brain._next_duty_start(480) == 540
+          and _brain._next_duty_start(960) == 1320 and _brain._next_duty_start(1380) == 540, None)
+
+    # P3-6 看门侧值班表判定覆盖（inbox_watch 函数化后可直接导入）
+    spec = importlib.util.spec_from_file_location(
+        "inbox_watch_mod", os.path.join(ROOT, "server", "inbox_watch.py"))
+    iw = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(iw)
+    c.tool("set_config", {"key": "brain.duty_windows", "value": "22:00-06:00,09:00-12:00"})
+    check("看门侧值班表解析同源", iw.duty_windows() == [(540, 720), (1320, 360)],
+          iw.duty_windows())
+    check("看门侧当前段结束点",
+          iw.current_segment_end(1410, iw.duty_windows()) == 360
+          and iw.current_segment_end(180, iw.duty_windows()) == 360
+          and iw.current_segment_end(480, iw.duty_windows()) is None
+          and iw.current_segment_end(600, iw.duty_windows()) == 720, None)
+    c.tool("set_config", {"key": "brain.duty_windows", "value": ""})
     data, _ = c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private",
                                           "chat_id": "10001", "contact_id": "10001",
                                           "display_name": "阿明", "text": "在吗"})

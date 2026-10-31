@@ -13,9 +13,9 @@
 | 本地 | `D:\z code shuju\chajianku\pebanchajian` |
 | 远端 | `https://github.com/CDCPwg/GML-fox-girl`（公开） |
 | 分支 | main（最新 `f690805` 之后若干提交） |
-| 标签 | v1.0 / v1.2 / v1.3 / v1.4（v1.1 从未打标，本地与远端均无） |
-| 版本 | 1.4.0（config.py / plugin.json / marketplace.json 三处同步） |
-| 测试 | 152 项端到端烟雾测试（`python glm-foxgirl\tests\test_smoke.py`，全部通过） |
+| 标签 | v1.0 / v1.2 / v1.3 / v1.4 / v1.5（均已推送远端） |
+| 版本 | 1.5.0（config.py / plugin.json / marketplace.json 三处同步） |
+| 测试 | 162 项端到端烟雾测试（`python glm-foxgirl\tests\test_smoke.py`，全部通过） |
 | 工具 | 49 个 MCP 工具 |
 
 命令行 git 用完整版：`D:\Git\cmd\git.exe`（2.56，GCM 凭据静默通过）。
@@ -64,7 +64,7 @@ ZCode 会话 = 大脑（persona-brain 技能驱动），`server/foxbot/` 包 = 1
 |---|---|
 | 数据（人格/记忆/记录/笔记） | `~/.persona-bot/` |
 | 插件源码 | `D:\z code shuju\chajianku\pebanchajian\glm-foxgirl\` |
-| 测试 | `python glm-foxgirl\tests\test_smoke.py`（应 152/152） |
+| 测试 | `python glm-foxgirl\tests\test_smoke.py`（应 162/162） |
 | 驾驶舱工作区 | `D:\z code shuju\chajianku\pebanchajian\workspace\` |
 | Git | `D:\Git\cmd\git.exe`（完整版 2.56，GCM 静默） |
 | 实测区 | `D:\zcode\xiangmuwenjainjia\GLM NIANG` |
