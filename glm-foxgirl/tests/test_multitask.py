@@ -219,7 +219,7 @@ check("守卫失配：回复持等，消息保留", not processed("守卫持等�
       and st.get("held", 0) >= 1 and len(wx_marker_calls()) == before + 1, (st, len(wx_marker_calls())))
 st = brain.brain_process_once()
 check("持等重试不重烧 LLM", len(wx_marker_calls()) == before + 1, len(wx_marker_calls()))
-check("超限放弃：标记处理交还工作台", processed("守卫持等测试消息"), st)
+check("超限放弃：清计数并标记处理", processed("守卫持等测试消息"), st)
 
 print("[6] 关联身份跨端接续：QQ 端上下文能看到微信端往来")
 link = identity.t_link_accounts("request", channel="qq", contact_id="10001",
@@ -232,6 +232,27 @@ system, user = brain._build_context("qq", "private", "10001", [msg], persona)
 check("微信端消息进入 QQ 端上下文", "（微信）" in user and "微信车道开启后的消息" in user,
       user[-300:])
 check("平台提示随车道切换", "你正在QQ上与人聊天" in system, system[-120:])
+
+print("[7] config 原子落盘：4 线程并发保存不损坏")
+import glob as _glob  # noqa: E402
+from foxbot.config import CONFIG_PATH as _CP, load_config as _lc, save_config as _sc  # noqa: E402
+
+
+def _hammer():
+    for i in range(40):
+        c = _lc()
+        c["brain"]["fail_streak"] = i % 5
+        _sc(c)
+
+
+hs = [threading.Thread(target=_hammer) for _ in range(4)]
+[t.start() for t in hs]
+[t.join() for t in hs]
+try:
+    _ok = isinstance(_lc(), dict)
+except Exception:
+    _ok = False
+check("并发保存后 config 仍合法且无临时文件残留", _ok and not _glob.glob(_CP + ".tmp*"), None)
 
 print("\nRESULT: PASS=%d FAIL=%d" % (len(PASS), len(FAIL)))
 if FAIL:

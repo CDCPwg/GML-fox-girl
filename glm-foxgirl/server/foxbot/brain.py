@@ -248,9 +248,10 @@ def _send_wechat(msg, text, cfg):
                 _wx_holds[str(msg["chat_id"])] = holds
                 hold_max = max(1, int(cfg.get("brain", {}).get("wechat_hold_max", 10)))
                 if holds >= hold_max:
+                    _wx_holds.pop(str(msg["chat_id"]), None)  # 放弃后清计数，新消息重新计满
                     return {"sent": False, "blocked": True,
                             "reason": f"微信聊天窗与 {name or '对方'} 持续不匹配（{holds} 次），"
-                                      "放弃发送并把消息交还工作台"}
+                                      "放弃发送（消息已标记处理，可在记录追溯中查看）"}
                 return {"sent": False, "hold": True,
                         "reason": f"微信当前聊天窗不是 {name or '对方'}，回复持等窗口就位"}
             _wx_holds.pop(str(msg["chat_id"]), None)

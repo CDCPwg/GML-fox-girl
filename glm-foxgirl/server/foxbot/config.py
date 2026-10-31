@@ -1,6 +1,7 @@
 """路径与配置：数据目录、默认配置、config.json 读写。"""
 import json
 import os
+import threading
 
 VERSION = "1.6.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
@@ -56,6 +57,16 @@ def load_config():
     return cfg
 
 
+_SAVE_LOCK = threading.Lock()
+
+
 def save_config(cfg):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    """原子落盘：先写临时文件再 os.replace（同卷原子替换，读方要么见旧要么见新），
+    防多线程/多进程交叉写损坏 config.json（v1.6 并发工作线程实测引入的风险）。
+    模块级锁串行化本进程内的并发保存；跨进程的读-改-写竞态由原子替换保证不损坏，
+    最后写入者生效。"""
+    tmp = CONFIG_PATH + ".tmp"
+    with _SAVE_LOCK:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_PATH)

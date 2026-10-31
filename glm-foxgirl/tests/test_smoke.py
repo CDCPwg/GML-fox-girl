@@ -738,7 +738,7 @@ def main():
     nap2 = start_fake_napcat(3996, record=naplog)
     coll = subprocess.Popen([sys.executable, SERVER, "--collector"], env=env3,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(30):
+    for _ in range(60):  # 18s：机器高载时 Python 子进程冷启动可能超过 9s
         try:
             with socket.create_connection(("127.0.0.1", 3995), timeout=0.3):
                 break
