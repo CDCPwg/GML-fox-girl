@@ -14,8 +14,8 @@
 | 远端 | `https://github.com/CDCPwg/GML-fox-girl`（公开） |
 | 分支 | main（最新 `f690805` 之后若干提交） |
 | 标签 | v1.0 / v1.2 / v1.3 / v1.4 / v1.5（均已推送远端） |
-| 版本 | 1.5.0（config.py / plugin.json / marketplace.json 三处同步） |
-| 测试 | 168 项端到端烟雾测试（`python glm-foxgirl\tests\test_smoke.py`，全部通过） |
+| 版本 | 1.6.0（config.py / plugin.json / marketplace.json 三处同步） |
+| 测试 | 168 项端到端烟雾测试 + 20 项多任务大脑测试（`test_smoke.py` / `test_multitask.py`，全部通过） |
 | 工具 | 49 个 MCP 工具 |
 
 命令行 git 用完整版：`D:\Git\cmd\git.exe`（2.56，GCM 凭据静默通过）。
@@ -58,13 +58,22 @@ ZCode 会话 = 大脑（persona-brain 技能驱动），`server/foxbot/` 包 = 1
 2. **V1.3 候选**：语音消息、记忆图可视化、微信无障碍深度集成、多实例管理
 3. 任何实测 bug：写成报告放实测区，或直接描述现象
 
+## 七点五、v1.6.0 多任务大脑（2026-10-31）
+
+- **会话分组并发**：待处理消息按（渠道, 会话）分组，组内一人连发的多条合并成一次 LLM 一并回应；组间在线程池并发（`brain.max_concurrency`，默认 3）——多人同时说话不再排队。LLM 失败/退避语义不变（整组保留待补）。
+- **渠道车道**：`brain.channels`（默认 "qq"；`"qq,wechat"` 双开）。上下文互不掺和、提示词标明平台；车道关闭的渠道不处理不标记（保留给工作台，与 v1.5 行为一致）。
+- **微信车道与守卫**：`brain.wechat_send_mode` = guard（默认，读屏确认聊天窗是对方才发，防串台错发）/ on / off。失配时回复缓存持等（不重烧 LLM），超过 `brain.wechat_hold_max`（默认 10）次放弃交还工作台。微信 ADB 发送全程串行锁。
+- **关联身份跨端接续**：私聊最近对话按身份组跨渠道合并（`_recent_context`），QQ/微信关联的同一人换端，另一端的往来以（QQ）/（微信）标记进入上下文。
+- 主动搭话仍仅 QQ（微信主动消息需聊天窗前置，不适合无人值守）。
+- 新增 `tests/test_multitask.py`（20 项，进程内直测，ThreadingHTTPServer 假 LLM 验证真实并发重叠）。
+
 ## 八、关键路径速查
 
 | 内容 | 路径 |
 |---|---|
 | 数据（人格/记忆/记录/笔记） | `~/.persona-bot/` |
 | 插件源码 | `D:\z code shuju\chajianku\pebanchajian\glm-foxgirl\` |
-| 测试 | `python glm-foxgirl\tests\test_smoke.py`（应 168/168） |
+| 测试 | `python glm-foxgirl\tests\test_smoke.py`（应 168/168）；`test_multitask.py`（应 20/20） |
 | 驾驶舱工作区 | `D:\z code shuju\chajianku\pebanchajian\workspace\` |
 | Git | `D:\Git\cmd\git.exe`（完整版 2.56，GCM 静默） |
 | 实测区 | `D:\zcode\xiangmuwenjainjia\GLM NIANG` |

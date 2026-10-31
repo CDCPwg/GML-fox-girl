@@ -30,7 +30,7 @@
 | 路径 | 作用 |
 |---|---|
 | `server/persona_mcp.py` | MCP 入口与工具注册表（47 个工具）；实现按领域拆在 `server/foxbot/` 包（config/db/embeddings/access/identity/memory/graph/stickers/qq/wechat/persona/session/webui/httpio/crypto/security/brain） |
-| `server/foxbot/brain.py` | 独立大脑守护进程（可选，--brain）：秒级轮询收件箱，规则预筛后调用 LLM 生成人格回复（OpenAI 兼容 API，与事件驱动看门互斥） |
+| `server/foxbot/brain.py` | 独立大脑守护进程（可选，--brain）：秒级轮询收件箱，会话分组并发 + 连发批量合并（多人同时回复不掉线），QQ/微信车道分离 + 微信读屏守卫，规则预筛后调用 LLM 生成人格回复（OpenAI 兼容 API，与事件驱动看门互斥） |
 | `server/foxbot/memory.py` | 记忆核心：遗忘曲线、语义检索、冲突消解（supersedes）、反思机制（reflect_due/material） |
 | `server/foxbot/qq.py` | NapCat 收发 + 事件收集器（**兼容 chunked 上报**）+ 掉线探测与备用登录 |
 | `commands/persona-handover` | `/persona-handover` 会话接力：总结存档后安全换新对话页（记忆外置无损） |

@@ -12,7 +12,7 @@ from datetime import datetime
 DATA = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 CFG = os.path.join(DATA, "config.json")
 
-GUIDE_VERSION = 13
+GUIDE_VERSION = 14
 
 GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 
@@ -51,6 +51,8 @@ GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 
 ━━ 日常可调（在聊天区说即可）━━
 - 值班表（默认关：全天由大脑或看门二选一处理消息）：开启即含自动换班，支持多段时间点与跨午夜 → 用户说"开启值班表"时，先与其确认时间节点（如"09:00-23:00"或"22:00-06:00,09:00-12:00"），确认后设置 brain.duty_windows；关闭说"关闭值班表"
+- 多任务并发：多人消息按会话分组同时处理、互不阻塞（brain.max_concurrency，默认 3；设 1 回串行）；同一人连发多条自动合并成一次回应
+- 渠道车道：brain.channels 默认仅 "qq"，QQ/微信双开写 "qq,wechat"（两渠道上下文互不掺和；关联身份换端自动接上另一端对话）；微信发送默认 guard 读屏防串台（brain.wechat_send_mode = guard/on/off）
 - 防风控：回复延迟 humanize.reply_delay_min_ms/max_ms、每小时限频 max_per_chat_per_hour、安静时段 proactive.quiet_hours
 - 心情温度：说"你现在心情低落一点"（-2~2，影响语气与主动意愿）
 - 表情包自动收集（默认开，按URL去重）：stickers.auto_collect false 关闭
