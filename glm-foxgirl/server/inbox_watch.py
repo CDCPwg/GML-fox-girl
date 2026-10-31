@@ -1,9 +1,9 @@
-"""收件箱看门脚本（零模型成本，双班制）：
+"""收件箱看门脚本（零模型成本）：
 
-- 夜班（大脑歇班时段，默认 23:00~次日 09:00）：每秒检查待处理入站消息，
-  出现即打印 PENDING_MESSAGES 并退出，唤醒 ZCode 会话处理消息。
-- 日班（brain.duty_start_hour~duty_end_hour，默认 09:00~23:00）：独立大脑值班，
-  本脚本长睡到交班时刻，零查询零空转（班次与 brain.py 值班表共用同一配置）。
+- 未启用值班表（默认）：24 小时每秒检查待处理入站消息，出现即打印 PENDING_MESSAGES
+  并退出，唤醒 ZCode 会话处理。
+- 启用值班表（brain.duty_windows，多段 "HH:MM-HH:MM"，支持跨午夜）：大脑值班时段本脚本
+  长睡到交班时刻，其余时段秒查——换班自动生效（换班内置于值班表，不单设开关）。
 
 部署方式二选一：
 - ZCode 后台任务：进程退出即触发任务完成通知，会话处理完消息后重新挂回；
@@ -14,10 +14,11 @@
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(
     os.path.expanduser("~"), ".persona-bot")
@@ -25,27 +26,58 @@ DB = os.path.join(DATA_DIR, "persona.db")
 MAX_BLOCK_SECONDS = float(os.environ.get("INBOX_WATCH_MAX_SECONDS", 4 * 3600) or 0)
 CHECK_SQL = ("SELECT COUNT(*) FROM messages"
              " WHERE processed=0 AND direction='in' AND msg_type!='blocked'")
+DUTY_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$")
 
 
-def duty_hours():
-    """班次读 config.json 的 brain.duty_start_hour / duty_end_hour（与 brain.py 同源）。"""
-    start_h, end_h = 9, 23
+def duty_windows():
+    """值班表（与 brain.py 同源同格式）：brain.duty_windows 多段 "HH:MM-HH:MM"，
+    兼容旧键 duty_start_hour/duty_end_hour（视为单段 "HH:00-HH:00"）。
+    未设置 → None（全天看门）。返回 [(start_min, end_min), ...]。"""
     try:
         with open(os.path.join(DATA_DIR, "config.json"), encoding="utf-8") as f:
             b = (json.load(f).get("brain") or {})
-        start_h = int(b.get("duty_start_hour", 9))
-        end_h = int(b.get("duty_end_hour", 23))
     except Exception:
-        pass
-    return start_h, end_h
+        return None
+    raw = str(b.get("duty_windows") or "").strip()
+    if not raw:
+        sh, eh = b.get("duty_start_hour"), b.get("duty_end_hour")
+        if sh is None or eh is None:
+            return None
+        try:
+            raw = f"{int(sh):02d}:00-{int(eh):02d}:00"
+        except (TypeError, ValueError):
+            return None
+    segs = []
+    for part in raw.split(","):
+        m = DUTY_RE.match(part.strip())
+        if not m:
+            continue
+        s = int(m.group(1)) * 60 + int(m.group(2))
+        e = int(m.group(3)) * 60 + int(m.group(4))
+        if s <= 1440 and e <= 1440 and s != e:
+            segs.append((s, e))
+    return segs or None
 
 
-def in_brain_duty(hour, start_h, end_h):
-    if start_h == end_h:
-        return False  # 全天看门
-    if start_h < end_h:
-        return start_h <= hour < end_h
-    return hour >= start_h or hour < end_h  # 跨午夜班（如 22~06）
+def in_brain_duty(cur_min, segs):
+    """cur_min（当日分钟数）是否落在任一值班段内（支持跨午夜段）。"""
+    for s, e in segs:
+        if s < e:
+            if s <= cur_min < e:
+                return True
+        elif cur_min >= s or cur_min < e:
+            return True
+    return False
+
+
+def current_segment_end(cur_min, segs):
+    """大脑当前所在值班段的结束分钟数（不在此值班则返回 None）。"""
+    for s, e in segs:
+        if s < e and s <= cur_min < e:
+            return e
+        if s > e and (cur_min >= s or cur_min < e):
+            return e
+    return None
 
 
 if not os.path.exists(DB):
@@ -55,14 +87,14 @@ if not os.path.exists(DB):
 conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=3)
 deadline = time.time() + MAX_BLOCK_SECONDS if MAX_BLOCK_SECONDS > 0 else None
 while True:
-    start_h, end_h = duty_hours()
-    if in_brain_duty(datetime.now().hour, start_h, end_h):
-        # 大脑值班：长睡到交班（end_h）时刻，期间零查询
-        now = datetime.now()
-        end = now.replace(hour=end_h, minute=0, second=0, microsecond=0)
-        if end <= now:
-            end += timedelta(days=1)
-        time.sleep(max(30, (end - now).total_seconds()))
+    now = datetime.now()
+    cur_min = now.hour * 60 + now.minute
+    segs = duty_windows()
+    end_min = current_segment_end(cur_min, segs) if segs else None
+    if end_min is not None:
+        # 大脑值班中：长睡到本班结束（看门接班点），期间零查询
+        delta = (end_min - cur_min) % 1440 or 1440
+        time.sleep(max(30, delta * 60 - now.second))
         if MAX_BLOCK_SECONDS > 0:
             deadline = time.time() + MAX_BLOCK_SECONDS
         continue

@@ -875,14 +875,26 @@ def main():
     c.tool("set_config", {"key": "brain.api_base", "value": "http://127.0.0.1:3997"})
     c.tool("set_config", {"key": "brain.api_key", "value": "test-key"})
     c.tool("set_config", {"key": "brain.model", "value": "test-model"})
-    c.tool("set_config", {"key": "brain.duty_start_hour", "value": 0})
     c.tool("set_config", {"key": "proactive.reply_probability_group", "value": 0})
     sys.path.insert(0, os.path.join(ROOT, "server"))
     os.environ["PERSONA_BOT_DATA_DIR"] = tmp
     from foxbot import brain as _brain
-    c.tool("set_config", {"key": "brain.duty_end_hour", "value": 24})
-    check("值班窗口可配置（全天值班）", _brain._in_duty_window() is True, None)
+    c.tool("set_config", {"key": "brain.duty_windows", "value": "22:00-06:00,09:00-12:00"})
+    check("值班表多段+跨午夜判定",
+          _brain._in_duty_window(datetime(2026, 1, 1, 23, 30)) is True
+          and _brain._in_duty_window(datetime(2026, 1, 1, 3, 0)) is True
+          and _brain._in_duty_window(datetime(2026, 1, 1, 8, 0)) is False
+          and _brain._in_duty_window(datetime(2026, 1, 1, 10, 0)) is True, None)
+    c.tool("set_config", {"key": "brain.duty_windows", "value": ""})
+    check("未启用值班表=全天值班",
+          _brain._in_duty_window(datetime(2026, 1, 1, 8, 0)) is True, None)
+    c.tool("set_config", {"key": "brain.duty_start_hour", "value": 9})
     c.tool("set_config", {"key": "brain.duty_end_hour", "value": 23})
+    check("值班表兼容旧键",
+          _brain._in_duty_window(datetime(2026, 1, 1, 10, 0)) is True
+          and _brain._in_duty_window(datetime(2026, 1, 1, 8, 0)) is False, None)
+    c.tool("set_config", {"key": "brain.duty_start_hour", "value": ""})
+    c.tool("set_config", {"key": "brain.duty_end_hour", "value": ""})
     data, _ = c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private",
                                           "chat_id": "10001", "contact_id": "10001",
                                           "display_name": "阿明", "text": "在吗"})

@@ -2,7 +2,7 @@
 
 规则预筛（零成本）：黑白名单 → 聊天内管理指令 → 群聊回复必要性门控。
 人格上下文：人格表（现有人格）+ 关系画像（身份组）+ 相关记忆 + 记忆图 + 最近对话。
-与事件驱动看门互斥：二选一，避免双脑重复回复。
+与事件驱动看门互斥：二选一，避免双脑重复回复；可选值班表（brain.duty_windows）启用后自动换班。
 LLM 走 OpenAI 兼容 /chat/completions（brain.api_base/api_key/model，默认关闭）。
 """
 import json
@@ -228,16 +228,6 @@ def brain_process_once(stats=None):
         channel, chat_type, chat_id = msg["channel"], msg["chat_type"], msg["chat_id"]
         contact_id = str(msg["contact_id"] or "")
 
-        # 值班边界保护：跳过今天开工时刻前创建的消息（夜班看门的交接处理中，防双脑重复回复）
-        try:
-            start_h, _ = _duty_hours()
-            created = datetime.strptime(msg.get("created_at") or "", "%Y-%m-%d %H:%M:%S")
-            if created < datetime.now().replace(hour=start_h, minute=0, second=0,
-                                                microsecond=0):
-                continue
-        except ValueError:
-            pass
-
         def done():
             t_mark_processed([mid])
 
@@ -299,6 +289,14 @@ def brain_process_once(stats=None):
             stats["skipped"] += 1
             done()
             continue
+        # 换班边界防重：发送前复查处理状态——若消息已被看门/夜班处理（processed=1）
+        # 则撤销本次回复（边界前后的消息不无视：未被回复的照常回复，已回复的不重复回）
+        with db.LOCK:
+            row = db.CONN.execute("SELECT processed FROM messages WHERE id=?",
+                                  (mid,)).fetchone()
+        if row and row[0]:
+            stats["skipped"] += 1
+            continue
         sent = _send_reply(msg, reply)
         if sent.get("sent"):
             stats["replied"] += 1
@@ -314,28 +312,60 @@ def brain_process_once(stats=None):
     return stats
 
 
-def _duty_hours():
+_DUTY_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$")
+
+
+def _duty_windows():
+    """值班表（可选，含自动换班）：brain.duty_windows，逗号分隔多段 "HH:MM-HH:MM"，
+    如 "09:00-23:00" 或 "22:00-06:00,09:00-12:00"（支持跨午夜，段数不限）。
+    未设置 → 全天值班：LLM 与看门二选一处理消息，无换班；设置后换班自动生效
+    （换班内置于值班表，不单设开关）。兼容旧键：仅设 duty_start_hour/duty_end_hour
+    时视为单段 "HH:00-HH:00"。返回 [(start_min, end_min), ...] 或 None。"""
     bcfg = config.load_config().get("brain", {})
-    try:
-        start_h = int(bcfg.get("duty_start_hour", 9))
-    except (TypeError, ValueError):
-        start_h = 9
-    try:
-        end_h = int(bcfg.get("duty_end_hour", 23))
-    except (TypeError, ValueError):
-        end_h = 23
-    return start_h, end_h
+    raw = str(bcfg.get("duty_windows") or "").strip()
+    if not raw:
+        sh, eh = bcfg.get("duty_start_hour"), bcfg.get("duty_end_hour")
+        if sh is None or eh is None:
+            return None
+        try:
+            raw = f"{int(sh):02d}:00-{int(eh):02d}:00"
+        except (TypeError, ValueError):
+            return None
+    segs = []
+    for part in raw.split(","):
+        m = _DUTY_RE.match(part.strip())
+        if not m:
+            continue
+        s = int(m.group(1)) * 60 + int(m.group(2))
+        e = int(m.group(3)) * 60 + int(m.group(4))
+        if s <= 1440 and e <= 1440 and s != e:
+            segs.append((s, e))
+    return segs or None
 
 
-def _in_duty_window():
-    """值班时段（双班架构）：默认 09:00~23:00 由大脑回复，窗口外自行歇班（长睡零空转），
-    与看门脚本（同时段静默长睡）构成精确到秒的昼夜交接。
-    brain.duty_start_hour / brain.duty_end_hour 可改班次（start>end 视为跨午夜班）。"""
-    start_h, end_h = _duty_hours()
-    h = datetime.now().hour
-    if start_h <= end_h:
-        return start_h <= h < end_h
-    return h >= start_h or h < end_h
+def _in_duty_window(now=None):
+    """此刻是否处于值班表内：未启用值班表 → 恒 True（全天值班）。"""
+    segs = _duty_windows()
+    if not segs:
+        return True
+    now = now or datetime.now()
+    cur = now.hour * 60 + now.minute
+    for s, e in segs:
+        if s < e:
+            if s <= cur < e:
+                return True
+        elif cur >= s or cur < e:  # 跨午夜段
+            return True
+    return False
+
+
+def _next_duty_start(cur_min):
+    """下一班开工的分钟数：今天尚未开始的最早段起点，否则明天最早班。"""
+    starts = sorted(s for s, _ in (_duty_windows() or []))
+    for s in starts:
+        if s > cur_min:
+            return s
+    return starts[0]
 
 
 _proactive_next = [0.0]
@@ -407,9 +437,11 @@ def main_brain(once=False):
         sys.exit(2)
     db.init_db()
     qq.start_collector_thread()
-    start_h, end_h = _duty_hours()
+    segs = _duty_windows()
+    duty_txt = ("全天值班（未启用值班表）" if not segs
+                else "值班表 " + str(config.load_config().get("brain", {}).get("duty_windows")))
     print(f"[glm-foxgirl] 独立大脑运行中：model={cfg['model']} poll={cfg.get('poll_seconds', 5)}s"
-          f"（值班 {start_h:02d}:00~{end_h:02d}:00，窗口外长睡歇班；与看门脚本互斥，勿同时开启）", file=sys.stderr)
+          f"（{duty_txt}；与看门脚本互斥，勿同时开启）", file=sys.stderr)
     if once:
         print(json.dumps(brain_process_once(), ensure_ascii=False), file=sys.stderr)
         return
@@ -419,9 +451,11 @@ def main_brain(once=False):
                 brain_process_once()
                 _brain_proactive()
             else:
-                # 歇班：长睡到下一班开工时刻，期间零查询零调用
+                # 值班表启用且当前歇班：长睡到下一班开工，期间零查询零调用
                 now = datetime.now()
-                start = now.replace(hour=_duty_hours()[0], minute=0, second=0, microsecond=0)
+                cur = now.hour * 60 + now.minute
+                start = (now.replace(hour=0, minute=0, second=0, microsecond=0)
+                         + timedelta(minutes=_next_duty_start(cur)))
                 if start <= now:
                     start += timedelta(days=1)
                 time.sleep(max(30, (start - now).total_seconds()))

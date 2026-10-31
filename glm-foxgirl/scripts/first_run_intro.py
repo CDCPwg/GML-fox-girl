@@ -12,7 +12,7 @@ from datetime import datetime
 DATA = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 CFG = os.path.join(DATA, "config.json")
 
-GUIDE_VERSION = 12
+GUIDE_VERSION = 13
 
 GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 
@@ -50,6 +50,7 @@ GUIDE = """【GLM狐狸娘 · 配置页功能指南】
 - 实时大脑守护进程（准实时人格回复，秒级轮询 + 调用 LLM API，与事件驱动看门互斥二选一）→ 说"启用实时大脑"并提供 API 地址/密钥/模型；运行 python server/persona_mcp.py --brain
 
 ━━ 日常可调（在聊天区说即可）━━
+- 值班表（默认关：全天由大脑或看门二选一处理消息）：开启即含自动换班，支持多段时间点与跨午夜 → 用户说"开启值班表"时，先与其确认时间节点（如"09:00-23:00"或"22:00-06:00,09:00-12:00"），确认后设置 brain.duty_windows；关闭说"关闭值班表"
 - 防风控：回复延迟 humanize.reply_delay_min_ms/max_ms、每小时限频 max_per_chat_per_hour、安静时段 proactive.quiet_hours
 - 心情温度：说"你现在心情低落一点"（-2~2，影响语气与主动意愿）
 - 表情包自动收集（默认开，按URL去重）：stickers.auto_collect false 关闭
