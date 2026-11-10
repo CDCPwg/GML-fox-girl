@@ -12,12 +12,11 @@ import sys
 
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PLUGIN_DIR, "server"))
-from foxbot import config, crypto  # noqa: E402
+from foxbot import config, qq  # noqa: E402
 
 cfg = config.load_config()["qq"]
 creds = cfg.get("credentials") or {}
 uin = str(creds.get("uin", ""))
-enc = creds.get("enc_password", "")
 shell_dir = (cfg.get("napcat_path") or "").strip()
 
 if not shell_dir:
@@ -26,15 +25,11 @@ if not shell_dir:
 if shell_dir.lower().endswith(".exe"):
     shell_dir = os.path.dirname(shell_dir)
 
-env = os.environ.copy()
-if uin:
-    env["ACCOUNT"] = uin
-if enc:
-    try:
-        env["NAPCAT_QUICK_PASSWORD"] = crypto.dpapi_unprotect(enc)
-        print("password fallback: armed")
-    except Exception as e:
-        print("password decrypt failed:", e)
+# 环境武装与插件 t_start_napcat 同源：密码兜底 + WebUI token 固定（_napcat_launch_env）
+env = qq._napcat_launch_env(cfg)
+armed = [k for k in ("ACCOUNT", "NAPCAT_QUICK_PASSWORD", "NAPCAT_WEBUI_SECRET_KEY")
+         if env.get(k) and env[k] != os.environ.get(k, "")]
+print("env armed:", ",".join(armed) if armed else "(无托管凭据/token，走原登录路径)")
 
 exe = os.path.join(shell_dir, "NapCatWinBootMain.exe")
 if not os.path.isfile(exe):

@@ -409,9 +409,12 @@ def _dig(obj, *keys):
 
 
 def _webui_login_state(credential):
-    resp = _webui_request("/api/QQLogin/CheckLoginStatus", credential=credential)
+    # 新版 NapCat 的 CheckLoginStatus 只收 POST（GET 404，实测区 11-10 踩坑）；旧版两者皆可
+    resp = _webui_request("/api/QQLogin/CheckLoginStatus", payload={}, credential=credential)
     if resp is None:
-        resp = _webui_request("/api/auth/login-info", credential=credential)
+        resp = _webui_request("/api/QQLogin/CheckLoginStatus", credential=credential)
+    if resp is None:
+        resp = _webui_request("/api/auth/login-info", payload={}, credential=credential)
     if resp is None:
         return None
     login = _dig(resp, "data", "login") or _dig(resp, "data", "online") or resp.get("login")
@@ -663,8 +666,32 @@ def t_find_napcat(roots=None, **_):
                      "请确认 NapCat.Shell 已安装，或 set_config qq.napcat_path 手动指定")}
 
 
+def _napcat_launch_env(qqcfg):
+    """拉起 NapCat 的环境武装（实测区 11-10 清单 ③⑤）：
+    ACCOUNT=托管 uin；NAPCAT_QUICK_PASSWORD=DPAPI 解密密码（快速登录票据失效时自动
+    密码登录，免扫码）；NAPCAT_WEBUI_SECRET_KEY=配置的 webui_token（NapCat 原生支持，
+    WebUI token 一处配置永久同步，杜绝 webui.json 漂移）。失败项静默跳过，绝不回显明文。"""
+    env = os.environ.copy()
+    creds = qqcfg.get("credentials") or {}
+    uin = str(creds.get("uin", "") or "")
+    if uin:
+        env["ACCOUNT"] = uin
+    enc = creds.get("enc_password", "")
+    if enc:
+        try:
+            from . import crypto
+            env["NAPCAT_QUICK_PASSWORD"] = crypto.dpapi_unprotect(enc)
+        except Exception:
+            pass  # 解密失败（非 Windows/数据损坏）：不武装密码兜底，走原登录路径
+    tok = str(qqcfg.get("webui_token", "") or "")
+    if tok:
+        env["NAPCAT_WEBUI_SECRET_KEY"] = tok
+    return env
+
+
 def t_start_napcat(uin=None, root=None, wait_seconds=60, **_):
-    """查找并启动 NapCat（NapCatWinBootMain.exe <QQ号>），随后轮询 OneBot 最多 wait_seconds 秒。"""
+    """查找并启动 NapCat（NapCatWinBootMain.exe <QQ号>），随后轮询 OneBot 最多 wait_seconds 秒。
+    启动即武装托管凭据环境（密码兜底）与 WebUI token 固定（见 _napcat_launch_env）。"""
     cfg = config.load_config()
     qqcfg = cfg.get("qq", {})
     if root:
@@ -677,7 +704,8 @@ def t_start_napcat(uin=None, root=None, wait_seconds=60, **_):
     framework = fw[0]
     exe = os.path.join(framework, NAPCAT_BOOT_EXE)
     u = str(uin or _napcat_uin() or "")
-    proc = subprocess.Popen([exe, u] if u else [exe], cwd=framework)
+    proc = subprocess.Popen([exe, u] if u else [exe], cwd=framework,
+                            env=_napcat_launch_env(qqcfg))
     wait = max(0, min(int(wait_seconds), 180))
     deadline = time.time() + wait
     logged_in, uin_seen = None, None

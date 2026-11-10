@@ -151,7 +151,11 @@ def start_fake_webui(port=3996, log=None):
                         .decode("utf-8", "replace"))
 
         def do_GET(self):
-            self._reply()
+            # 新版 NapCat 对 CheckLoginStatus 的 GET 一律 404（实测区 11-10 踩坑）：
+            # 模拟之，逼出并锁死 _webui_login_state 的 POST 路径
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def log_message(self, fmt, *args):
             pass
@@ -930,6 +934,12 @@ def main():
           and iw.current_segment_end(480, iw.duty_windows()) is None
           and iw.current_segment_end(600, iw.duty_windows()) == 720, None)
     c.tool("set_config", {"key": "brain.duty_windows", "value": ""})
+    from foxbot import qq as _qq_mod
+    _env = _qq_mod._napcat_launch_env({"credentials": {"uin": "123", "enc_password": "bad-blob"},
+                                       "webui_token": "tok123"})
+    check("NapCat 启动环境武装（解密失败静默跳过）",
+          _env.get("ACCOUNT") == "123" and "NAPCAT_QUICK_PASSWORD" not in _env
+          and _env.get("NAPCAT_WEBUI_SECRET_KEY") == "tok123", None)
     data, _ = c.tool("simulate_inbound", {"channel": "qq", "chat_type": "private",
                                           "chat_id": "10001", "contact_id": "10001",
                                           "display_name": "阿明", "text": "在吗"})

@@ -29,7 +29,7 @@ DEFAULT_CONFIG = {
     "stickers": {"auto_collect": True},
     "wechat": {"enabled": False, "adb_path": "adb", "device_serial": "", "input_tap_x": 0,
                "input_tap_y": 0, "human_trace": True},
-    "brain": {"enabled": False, "api_base": "", "api_key": "", "model": "", "poll_seconds": 5,
+    "brain": {"api_base": "", "api_key": "", "model": "", "poll_seconds": 5,
               "temperature": 1.0, "max_tokens": 2000, "duty_windows": "",
               "fail_streak": 0, "last_fail": "", "backoff_max_seconds": 300,
               "max_concurrency": 3, "channels": "qq",
