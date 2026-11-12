@@ -212,9 +212,9 @@ def t_manage_mood(action="get", mood=0, reason="", **_):
 
 PERSONA_CMDS = (
     ("/personahelp", "help"), ("/personas", "list"), ("/botstatus", "status"), ("/persona", "switch"),
-    ("/handover", "handover"),
+    ("/handover", "handover"), ("/captcha", "captcha"),
     ("切换人格", "switch"), ("人格列表", "list"), ("机器人状态", "status"), ("人格指令", "help"),
-    ("交接", "handover"),
+    ("交接", "handover"), ("验证码", "captcha"),
 )
 
 
@@ -266,6 +266,19 @@ def t_bot_command(text, channel="", contact_id="", chat_id="", **_):
                     "data": {"hint": "立即执行会话交接：总结本会话 → session_note(action=save) → 回复确认；"
                                      "limits.auto_reopen=true 时可用 CronCreate 建 1 分钟后的一次性"
                                      "'恢复值机'任务自动开新页"}}
+        if action == "captcha":
+            # 半自动验证码闭环收尾（实测区清单⑥）：管理员把验证页票据发回来，这里提交给 NapCat
+            parts = arg.split()
+            if not parts:
+                return {"handled": True, "allowed": True, "action": "captcha", "ok": False,
+                        "reply": "用法：验证码 <ticket> [randstr]（提交 NapCat 登录验证票据）"}
+            from . import qq as qq_mod
+            res = qq_mod.t_captcha_login(ticket=parts[0], randstr=parts[1] if len(parts) > 1 else "")
+            if res.get("ok"):
+                return {"handled": True, "allowed": True, "action": "captcha", "ok": True,
+                        "reply": "验证码提交成功，QQ 已重新在线。"}
+            return {"handled": True, "allowed": True, "action": "captcha", "ok": False,
+                    "reply": "验证码提交失败：" + str(res.get("error") or res.get("hint") or "未知原因")}
     if action == "status":
         from . import session
         st = session.t_bot_status()

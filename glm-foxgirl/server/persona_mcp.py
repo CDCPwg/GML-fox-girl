@@ -22,8 +22,9 @@ from foxbot.memory import (t_memory_conflicts, t_prune_memory, t_query_memory,
                            t_reflect_due, t_reflect_material, t_store_memory)
 from foxbot.persona import (t_bot_command, t_import_sillytavern, t_manage_mood,
                             t_manage_persona, t_manage_rules)
-from foxbot.qq import (t_flush_outbox, t_poke_qq, t_qq_login_status, t_qq_relogin,
-                       t_save_qq_credentials, t_send_qq_message, t_find_napcat, t_start_napcat)
+from foxbot.qq import (t_captcha_login, t_flush_outbox, t_poke_qq, t_qq_login_status,
+                       t_qq_relogin, t_save_qq_credentials, t_send_qq_message, t_find_napcat,
+                       t_start_napcat)
 from foxbot.session import (t_bot_status, t_check_access, t_configure_channel,
                             t_export_transcript, t_get_config, t_get_pending_messages,
                             t_get_stats, t_mark_processed, t_proactive_due,
@@ -82,7 +83,8 @@ TOOLS = {
     "link_accounts": (t_link_accounts, "QQ/WX 账号关联器：action=request 发起关联（生成6位确认码，私下转达对方）；对方在自己平台用本人账号发'关联确认 <码>'→ action=confirm；画像自动调和（单侧继承/相似合并/不相似返回 conflict 由该账号选 a/b/merge 后 action=resolve）；记忆按身份组互联检索。action=ids 展开身份组（查画像/记忆前先调）；status 查看；unlink 解除。", {"type": "object", "properties": {"action": {"type": "string", "enum": ["request", "confirm", "resolve", "status", "ids", "unlink"]}, "channel": {"type": "string"}, "contact_id": {"type": "string"}, "peer_channel": {"type": "string"}, "peer_contact_id": {"type": "string"}, "code": {"type": "string"}, "request_id": {"type": "number"}, "choice": {"type": "string", "enum": ["a", "b", "merge"]}}, "required": ["action"]}),
     "save_qq_credentials": (t_save_qq_credentials, "托管 QQ 账号密码（可选的备用登录方案）：密码经 Windows DPAPI 加密后落盘（本机本用户才可解密），接口永不回显明文。掉线时自动尝试快速登录；快速登录失败仍需手动验证。", {"type": "object", "properties": {"uin": {"type": "string"}, "password": {"type": "string"}}, "required": ["uin", "password"]}),
     "qq_login_status": (t_qq_login_status, "QQ 登录状态探测：OneBot get_login_info 优先；不可达时用 WebUI（qq.webui_url/token）区分 NapCat 宕机与掉线。状态：logged_in/offline/napcat_down/unknown。", {"type": "object", "properties": {}}),
-    "qq_relogin": (t_qq_relogin, "备用登录：尝试 WebUI 快速登录恢复在线；失败返回 need_manual 与提醒话术（账密已加密托管但不回显）。看门/大脑检测到掉线时调用。", {"type": "object", "properties": {}}),
+    "qq_relogin": (t_qq_relogin, "备用登录：尝试 WebUI 快速登录恢复在线；票据失效自动转托管密码登录（需人工验证时推送 proofWaterUrl 给管理员，回复「验证码 <ticket> [randstr]」或调 captcha_login 收尾）。失败返回 need_manual 与提醒话术（账密已加密托管但不回显）。看门/大脑检测到掉线时调用。", {"type": "object", "properties": {}}),
+    "captcha_login": (t_captcha_login, "半自动验证码登录收尾：密码登录触发人工验证（proofWaterUrl）后，提交验证页给出的 ticket 完成登录（uin/sid 缺省取待提交会话，密码 MD5 由托管凭据即时解密，零明文）。聊天内管理员可直接发「验证码 <ticket> [randstr]」。", {"type": "object", "properties": {"ticket": {"type": "string"}, "randstr": {"type": "string"}, "uin": {"type": "string"}, "sid": {"type": "string"}}, "required": ["ticket"]}),
     "recent_blocks": (t_recent_blocks, "内容防火墙拦截记录：被拦截的恶意内容仅元数据（不回传攻击原文，防二次注入）+ 守卫计数。管理员审查用。", {"type": "object", "properties": {"limit": {"type": "number", "default": 20}}}),
     "find_napcat": (t_find_napcat, "查找 NapCat 框架目录（含 NapCatWinBootMain.exe）：手动路径 → 运行中的 QQ 进程 → 注册表 → 常见根目录限时扫描。roots 参数可覆盖扫描根（调试用）。", {"type": "object", "properties": {"roots": {"type": "array", "items": {"type": "string"}}}}),
     "start_napcat": (t_start_napcat, "查找并启动 NapCat（NapCatWinBootMain.exe <QQ号>，QQ 号自动取已托管凭证），启动后轮询 OneBot 确认上线。root 参数可指定框架目录（调试用）。", {"type": "object", "properties": {"uin": {"type": "string"}, "root": {"type": "string"}, "wait_seconds": {"type": "number", "default": 60}}}),

@@ -758,21 +758,132 @@ def t_qq_login_status(**_):
                 "hint": "调用失败，可调 qq_relogin 尝试恢复"}
 
 
+def _online_now():
+    try:
+        data = (napcat_post("get_login_info", {}) or {}).get("data") or {}
+        return bool(data.get("user_id")), str(data.get("user_id") or "")
+    except Exception:
+        return False, ""
+
+
+def _password_md5():
+    """托管密码 → passwordMd5（NapCat PasswordLogin 协议要求 MD5，实测区 11-10 逆向）。
+    即时解密即时转换，明文不落盘不回显。"""
+    creds = config.load_config().get("qq", {}).get("credentials") or {}
+    enc = creds.get("enc_password", "")
+    if not enc:
+        return None
+    try:
+        from . import crypto
+        return hashlib.md5(crypto.dpapi_unprotect(enc).encode("utf-8")).hexdigest()
+    except Exception:
+        return None
+
+
+def _dig_ci(d, *names):
+    """大小写无关地取字典字段（NapCat 各版本响应字段命名不稳定）。"""
+    for n in names:
+        for k, v in (d.items() if isinstance(d, dict) else []):
+            if str(k).lower() == n.lower() and v not in (None, ""):
+                return v
+    return None
+
+
+def _password_login_attempt(credential, uin, notes):
+    """半自动验证码闭环第一步（实测区清单⑥）：快速登录票据失效后，用托管密码走
+    PasswordLogin；直接过则上线；需要人工验证则把 proofWaterUrl 推给管理员，
+    待提交会话落盘（qq.captcha_pending，30 分钟时效），由 captcha_login/聊天指令收尾。"""
+    md5 = _password_md5()
+    if not md5:
+        notes.append("托管密码不可用（未托管或解密失败），跳过密码登录")
+        return None
+    notes.append("快速登录票据失效，尝试托管密码登录（PasswordLogin）")
+    try:
+        resp = _webui_request("/api/QQLogin/PasswordLogin",
+                              {"uin": uin, "passwordMd5": md5}, credential=credential)
+    except Exception as e:
+        notes.append("密码登录请求失败：" + str(e)[:80])
+        return None
+    data = (resp or {}).get("data") or {}
+    st = _webui_login_state(credential)
+    if st and st[0]:
+        _notify_admins("[恢复] NapCat/QQ 已重新在线（托管密码登录）。")
+        return {"ok": True, "state": "logged_in", "method": "webui-password-login",
+                "uin": str(st[1] or uin or ""), "notes": notes}
+    url = _dig_ci(data, "proofWaterUrl", "proofwaterurl", "url")
+    if _dig_ci(data, "needCaptcha", "needcaptcha") or url:
+        pending = {"uin": str(uin or ""), "sid": str(_dig_ci(data, "sid", "sessionid") or ""),
+                   "proof_water_url": str(url or ""), "ts": db.now_str()}
+        cfg = config.load_config()
+        cfg.setdefault("qq", {})["captcha_pending"] = pending
+        config.save_config(cfg)
+        _notify_admins(
+            "[登录验证] 快速登录票据已失效，密码登录需要人工验证。\n"
+            "请打开链接完成短信/滑块验证，拿到票据后回复：验证码 <ticket> [randstr]\n"
+            + (str(url) if url else "（验证页地址未返回，请在 NapCat 登录窗口查看）"))
+        return {"ok": False, "state": "need_captcha",
+                "proof_water_url": str(url or ""), "uin": str(uin or ""), "notes": notes,
+                "hint": "人工完成验证后，用 captcha_login 工具或聊天指令「验证码 <ticket> [randstr]」提交"}
+    notes.append("密码登录未成功：" + json.dumps(data, ensure_ascii=False)[:120])
+    return None
+
+
+def t_captcha_login(ticket="", randstr="", uin=None, sid=None, **_):
+    """半自动验证码闭环收尾（实测区清单⑥）：把人工验证拿到的 ticket 提交给 NapCat
+    CaptchaLogin 完成登录。uin/sid 缺省取待提交会话（qq.captcha_pending，30 分钟时效）；
+    密码 MD5 由托管凭据即时解密，全程零明文。聊天内管理员可直接发「验证码 <ticket> [randstr]」。"""
+    ticket = str(ticket or "").strip()
+    if not ticket:
+        return {"ok": False, "error": "缺少 ticket（验证页给出的票据）",
+                "hint": "先触发 qq_relogin（票据失效会自动走密码登录并推送验证链接）"}
+    cfg = config.load_config()
+    qqcfg = cfg.get("qq", {})
+    creds = qqcfg.get("credentials") or {}
+    pending = qqcfg.get("captcha_pending") or {}
+    u = str(uin or pending.get("uin") or creds.get("uin", "") or "")
+    s = str(sid if sid is not None else pending.get("sid", "") or "")
+    md5 = _password_md5()
+    if not u or not md5:
+        return {"ok": False, "error": "未托管账密或缺少 uin，无法提交验证码"}
+    if pending.get("ts"):
+        try:
+            if time.time() - db._parse_dt(pending["ts"]) > 1800:
+                return {"ok": False, "error": "待提交会话已过期（30 分钟），请重新触发 qq_relogin"}
+        except Exception:
+            pass
+    credential = _webui_credential()
+    if not credential:
+        return {"ok": False, "error": "WebUI 未配置（qq.webui_url/webui_token），无法提交验证码"}
+    try:
+        _webui_request("/api/QQLogin/CaptchaLogin",
+                       {"uin": u, "passwordMd5": md5, "ticket": ticket,
+                        "randstr": str(randstr or ""), "sid": s}, credential=credential)
+    except Exception as e:
+        return {"ok": False, "error": "CaptchaLogin 请求失败：" + str(e)[:100]}
+    for _ in range(3):
+        time.sleep(2)
+        st = _webui_login_state(credential)
+        ok2, cur = (st[0], st[1]) if st else _online_now()
+        if ok2:
+            cfg2 = config.load_config()
+            cfg2.get("qq", {}).pop("captcha_pending", None)
+            config.save_config(cfg2)
+            _notify_admins("[恢复] NapCat/QQ 已重新在线（验证码登录）。")
+            return {"ok": True, "state": "logged_in", "method": "webui-captcha-login",
+                    "uin": str(cur or u)}
+    data_err = "票据无效或人工验证未完成；请确认已打开 proofWaterUrl 页面完成验证后重新提交"
+    return {"ok": False, "state": "captcha_rejected", "hint": data_err}
+
+
 def t_qq_relogin(**_):
-    """备用登录全自动链：探测 → 发现并拉起 NapCat → WebUI 快速登录 → 如实降级提醒。
+    """备用登录全自动链：探测 → 发现并拉起 NapCat → WebUI 快速登录 → 托管密码半自动闭环
+    （PasswordLogin → 需人工验证时推送 proofWaterUrl 给管理员）→ 如实降级提醒。
     qq.autostart=false 时跳过自动拉起；任何情况下不回显已托管的账密。"""
     notes = []
     creds = config.load_config().get("qq", {}).get("credentials", {})
     uin = str(creds.get("uin", "") or "")
 
-    def online():
-        try:
-            data = (napcat_post("get_login_info", {}) or {}).get("data") or {}
-            return bool(data.get("user_id")), str(data.get("user_id") or "")
-        except Exception:
-            return False, ""
-
-    ok, cur = online()
+    ok, cur = _online_now()
     if ok:
         return {"ok": True, "state": "logged_in", "uin": cur, "notes": ["本就在线，无需重登"]}
 
@@ -785,7 +896,7 @@ def t_qq_relogin(**_):
     else:
         notes.append("qq.autostart=false，跳过自动拉起")
 
-    ok, cur = online()
+    ok, cur = _online_now()
     if ok:
         _notify_admins("[恢复] NapCat/QQ 已重新在线（uin " + (cur or "?") + "）。")
         return {"ok": True, "state": "logged_in", "uin": cur, "notes": notes}
@@ -798,17 +909,22 @@ def t_qq_relogin(**_):
                            {"uin": uin} if uin else {}, credential=credential)
         except Exception as e:
             notes.append("快速登录尝试失败：" + str(e)[:80])
-        for _ in range(10):
-            time.sleep(3)
+        # 票据活着的话几秒内必上线；死等 30s 无意义，尽早转托管密码闭环
+        for _ in range(3):
+            time.sleep(2)
             state = _webui_login_state(credential)
             if state and state[0]:
                 _notify_admins("[恢复] NapCat/QQ 已重新在线（快速登录）。")
                 return {"ok": True, "state": "logged_in", "method": "webui-quick-login",
                         "uin": str(state[1] or cur or uin or ""), "notes": notes}
-            ok, cur = online()
+            ok, cur = _online_now()
             if ok:
                 _notify_admins("[恢复] NapCat/QQ 已重新在线（快速登录）。")
                 return {"ok": True, "state": "logged_in", "uin": cur, "notes": notes}
+
+    result = _password_login_attempt(credential, uin, notes)
+    if result is not None:
+        return result
 
     _notify_admins("[告警] NapCat 自动恢复失败，需要人工登录（扫码或输入已托管账密）。")
     return {"ok": False, "state": "need_manual", "notes": notes,

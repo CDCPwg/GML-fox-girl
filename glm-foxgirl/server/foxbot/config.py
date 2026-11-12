@@ -3,7 +3,7 @@ import json
 import os
 import threading
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 DATA_DIR = os.environ.get("PERSONA_BOT_DATA_DIR") or os.path.join(os.path.expanduser("~"), ".persona-bot")
 DB_PATH = os.path.join(DATA_DIR, "persona.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")

@@ -128,8 +128,11 @@ def start_fake_napcat(port=3999, record=None):
     return srv
 
 
-def start_fake_webui(port=3996, log=None):
-    """模拟 NapCat WebUI：hash 认证发 Credential，登录状态恒在线（GET/POST 都答）。"""
+def start_fake_webui(port=3996, log=None, state=None):
+    """模拟 NapCat WebUI：hash 认证发 Credential；state 缺省恒在线；
+    state={"quick_ok": bool, "sid": str} 时模拟完整半自动闭环——票据失效
+    （CheckLoginStatus 全 false）→ PasswordLogin 回 needCaptcha → CaptchaLogin 后恢复在线。
+    GET 一律 404（模拟新版 NapCat，锁死 POST 路径）。"""
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     class H(BaseHTTPRequestHandler):
@@ -138,6 +141,19 @@ def start_fake_webui(port=3996, log=None):
                 log.append({"path": self.path, "body": body})
             if self.path == "/api/auth/login":
                 out = b'{"data":{"Credential":"cred-test"}}'
+            elif self.path == "/api/QQLogin/PasswordLogin":
+                if state and not state.get("quick_ok", True):
+                    out = json.dumps({"data": {"needCaptcha": True, "sid": state.get("sid", ""),
+                                               "proofWaterUrl": "https://captcha.example/proof?sid="
+                                                                + state.get("sid", "")}}).encode("utf-8")
+                else:
+                    out = b'{"data":{"login":true}}'
+            elif self.path == "/api/QQLogin/CaptchaLogin":
+                if state is not None:
+                    state["quick_ok"] = True
+                out = b'{"data":{"login":true}}'
+            elif state is not None and not state.get("quick_ok", True):
+                out = b'{"data":{"login":false,"uin":"10001"}}'
             else:
                 out = b'{"data":{"login":true,"uin":"10001"}}'
             self.send_response(200)
@@ -263,7 +279,7 @@ def main():
 
     r = c.call("tools/list")
     tools = [t["name"] for t in r["result"]["tools"]]
-    check("tools/list 返回 49 个工具", len(tools) == 49, f"got {len(tools)}: {tools}")
+    check("tools/list 返回 50 个工具", len(tools) == 50, f"got {len(tools)}: {tools}")
 
     data, err = c.tool("manage_persona", {"action": "create", "name": "小婉",
                                           "prompt": "你叫小婉，20岁大学生，语气活泼爱用颜文字，游戏话痨。",
@@ -824,7 +840,8 @@ def main():
     # 实测区回归（GLM NIANG 补丁⑥⑦）：WebUI hash 认证 + SetQuickLogin
     # 端口用 3993：3996 已被本文件 chunked 段的假 NapCat 占用（Windows SO_REUSEADDR 会静默共存）
     webuilog = []
-    webui = start_fake_webui(3993, log=webuilog)
+    cap_state = {"quick_ok": True, "sid": "sid-test-1"}
+    webui = start_fake_webui(3993, log=webuilog, state=cap_state)
     c.tool("set_config", {"key": "qq.webui_url", "value": "http://127.0.0.1:3993"})
     c.tool("set_config", {"key": "qq.webui_token", "value": "test-token"})
     c.tool("set_config", {"key": "qq.autostart", "value": False})
@@ -836,8 +853,38 @@ def main():
     check("快速登录调用 SetQuickLogin", len(quicks) >= 1, quicks)
     check("快速登录成功回执", data.get("ok") is True
           and data.get("method") == "webui-quick-login", data)
-    webui.shutdown()
+
+    # 半自动验证码闭环（实测区清单⑥）：票据失效 → 密码登录 → needCaptcha → 管理员提交
+    cap_state["quick_ok"] = False
+    c.tool("set_config", {"key": "alerts.enabled", "value": True})
+    logins = [r for r in webuilog if r["path"] == "/api/QQLogin/PasswordLogin"]
+    data, _ = c.tool("qq_relogin", {})
+    logins = [r for r in webuilog if r["path"] == "/api/QQLogin/PasswordLogin"]
+    check("票据失效自动转密码登录", data.get("state") == "need_captcha"
+          and data.get("proof_water_url", "").startswith("https://captcha.example/")
+          and len(logins) >= 1 and "passwordMd5" in logins[-1]["body"]
+          and "uin" in logins[-1]["body"], (data, logins[-1:]))
+    d2, _ = c.tool("get_config", {})
+    pend = (d2.get("qq") or {}).get("captcha_pending") or {}
+    check("待提交会话落盘（uin+sid）", pend.get("uin") == "2139214603"
+          and pend.get("sid") == "sid-test-1", pend)
+    conn = sqlite3.connect(os.path.join(tmp, "persona.db"))
+    alerts = conn.execute("SELECT text FROM alert_queue ORDER BY id DESC LIMIT 3").fetchall()
+    conn.close()
+    check("验证页链接已推送管理员告警", any("验证码 <ticket>" in str(r) or "captcha.example" in str(r)
+                                          for r in alerts), alerts)
+    data, _ = c.tool("bot_command", {"text": "验证码 t-123 r-456", "channel": "qq",
+                                     "contact_id": "10001"})
+    check("聊天指令提交票据后上线", data.get("ok") is True
+          and "重新在线" in data.get("reply", ""), data)
+    d2, _ = c.tool("get_config", {})
+    check("提交成功后待提交会话清除", not ((d2.get("qq") or {}).get("captcha_pending")), None)
+    data, _ = c.tool("captcha_login", {"ticket": "t-456"})
+    check("captcha_login 工具直提交可用", data.get("ok") is True
+          and data.get("method") == "webui-captcha-login", data)
+    c.tool("set_config", {"key": "alerts.enabled", "value": False})
     c.tool("set_config", {"key": "qq.autostart", "value": True})
+    webui.shutdown()
 
     print("[v0.16] 内容防火墙 / 人格强锁定")
     conn = sqlite3.connect(os.path.join(tmp, "persona.db"))

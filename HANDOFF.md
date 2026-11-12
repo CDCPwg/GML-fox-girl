@@ -14,9 +14,9 @@
 | 远端 | `https://github.com/CDCPwg/GML-fox-girl`（公开） |
 | 分支 | main（最新 `f690805` 之后若干提交） |
 | 标签 | v1.0 / v1.2 / v1.3 / v1.4 / v1.5（均已推送远端） |
-| 版本 | 1.6.0（config.py / plugin.json / marketplace.json 三处同步） |
+| 版本 | 1.7.0（config.py / plugin.json / marketplace.json 三处同步） |
 | 测试 | 168 项端到端烟雾测试 + 20 项多任务大脑测试（`test_smoke.py` / `test_multitask.py`，全部通过） |
-| 工具 | 49 个 MCP 工具 |
+| 工具 | 50 个 MCP 工具 |
 
 命令行 git 用完整版：`D:\Git\cmd\git.exe`（2.56，GCM 凭据静默通过）。
 
@@ -28,7 +28,7 @@ ZCode 会话 = 大脑（persona-brain 技能驱动），`server/foxbot/` 包 = 1
 
 | 模式 | 启动命令 | 用途 |
 |---|---|---|
-| MCP stdio | ZCode 插件自动启动 | 49 个工具供大脑调用 |
+| MCP stdio | ZCode 插件自动启动 | 50 个工具供大脑调用 |
 | 事件驱动看门 | `server/inbox_watch.py`（ZCode 后台任务） | 消息到达即唤醒，零模型成本 |
 | 独立大脑 | `python server/persona_mcp.py --brain` | 秒级轮询 + LLM 人格回复 |
 | 独立收集器 | `python server/persona_mcp.py --collector` | 24/7 接收 NapCat 上报 |
@@ -66,6 +66,7 @@ ZCode 会话 = 大脑（persona-brain 技能驱动），`server/foxbot/` 包 = 1
 - **关联身份跨端接续**：私聊最近对话按身份组跨渠道合并（`_recent_context`），QQ/微信关联的同一人换端，另一端的往来以（QQ）/（微信）标记进入上下文。
 - 主动搭话仍仅 QQ（微信主动消息需聊天窗前置，不适合无人值守）。
 - 新增 `tests/test_multitask.py`（20 项，进程内直测，ThreadingHTTPServer 假 LLM 验证真实并发重叠）。
+- **v1.7.0 半自动验证码闭环**（实测区清单⑥）：快速登录票据失效自动转托管密码登录（PasswordLogin，MD5 即时解密）；需人工验证时 proofWaterUrl 经即时告警推给管理员，管理员回复「验证码 <ticket> [randstr]」或调 captcha_login（第 50 个工具）提交完成登录；待提交会话落盘 qq.captcha_pending（30 分钟时效），成功自动清除，全程零明文。
 
 ## 八、关键路径速查
 
